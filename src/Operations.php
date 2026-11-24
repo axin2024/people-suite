@@ -10,8 +10,15 @@ final class Operations
     {
     }
 
-    public function once(Access $actor, int $companyId, string $action, string $key, array $input, callable $work): array
-    {
+    public function once(
+        Access $actor,
+        int $companyId,
+        string $action,
+        string $key,
+        array $input,
+        callable $work,
+        bool $repeatableRead = false,
+    ): array {
         $key = Input::code($key, 'request_key');
         $scope = [$actor->groupId, $companyId, $actor->accountId, $action, $key];
         $digest = hash('sha256', json_encode(self::canonical($input), JSON_THROW_ON_ERROR));
@@ -39,7 +46,7 @@ final class Operations
                 [json_encode($result, JSON_THROW_ON_ERROR), ...$scope],
             );
             return $result;
-        });
+        }, $repeatableRead);
     }
 
     public function audit(

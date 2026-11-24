@@ -71,6 +71,7 @@
 | POST `/attendance/shifts/{shift}/punches` | 键。传 `source`、`event_ref`、`direction`（`in` 或 `out`）、`punched_at`。设备与事件的相同内容重放返回原回执。 |
 | POST `/attendance/shifts/{shift}/resolution` | 键。传 `version`、`state`（`worked`、`absent`、`excused` 或 `cancelled`）、`decision_ref`、`explanation`。HR 可传 `worked_minutes` 核定异常工时。 |
 | GET `/attendance/watermark` | HR 和薪酬角色可查当前法人考勤水位。 |
+| POST `/employments/{id}/attendance-certifications` | 键。HR 传 `starts_on`、`ends_before`、`expected_shifts`、`decision_ref` 和 `notes`。预期班次与排班一致且都已核对时，生成该任职的考勤确认。 |
 
 时间戳使用带时区的 RFC 3339 秒级字符串，例如 `2026-04-15T22:00:00+08:00`。工作日取班次开始时在法人时区的日期。班次可跨午夜，时长介于 1 分钟和 24 小时之间。回读时间戳以 Unix 秒表示。审批后补录打卡会新增异常版本，保留此前的版本和核对记录。
 
@@ -91,3 +92,17 @@
 | POST 基础路径 | 键。HR 或本人传 `kind`、`workday`、`minutes`、`reason` 和 `reference`，预占额度。 |
 | GET `/{request}` | 查申请和账本记录。 |
 | POST `/{request}/approve`、`/deny`、`/cancel` | 键。传 `version`、`decision_ref`。通过转作已用，拒批或销假返还余额。本人可撤回待批申请，已批准的申请由 HR 或主管销假。 |
+
+## 薪资试算
+
+路径以 `/api/companies/{company}/payroll` 开头。制单人创建规则和试算，两类薪酬角色均可查看所属法人的结果。金额以币种的最小记账单位传入，4,500 元即 450000 分。
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| POST `/rules` | 键。传 `rule_ref`、`title`、`proration_basis`。可配置 `monthly_allowance_minor`、`absence_hourly_minor`、`withholding_bps`、`withholding_exempt_minor`，默认均为 0。 |
+| POST `/runs` | 键。传月份首日 `period_start`，创建一个法人的完整自然月账期。 |
+| POST `/runs/{id}/trial` | 键。提交当前账期 `version`、`rule_id`、`attendance_watermark`。每次试算留下独立快照。 |
+| GET `/runs/{id}` | 账期与最新试算结果。工资单可传 `?after=ID` 分页。 |
+| GET `/payslips/{id}` | 读取任意保留的试算单，含已引用的合同、任职、规则、考勤确认及每段金额。 |
+
+`actual_days` 使用当月自然日数分摊，`fixed_30` 用于 30 天账期。工资和固定津贴按任职与合同生效日拆段，在分位对合计四舍五入，尾差按小数余数分配。缺少考勤确认、选定水位下已有后续班次版本、任职重叠或合同缺失时，员工试算单标记阻断并记录原因。扣缴配置是一组可核对的示例参数，部署方按所在地区核准。

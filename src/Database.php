@@ -56,8 +56,11 @@ final class Database
         return (int) $this->connection->lastInsertId();
     }
 
-    public function transaction(callable $work): mixed
+    public function transaction(callable $work, bool $repeatableRead = false): mixed
     {
+        if ($repeatableRead) {
+            $this->connection->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+        }
         $this->connection->beginTransaction();
         try {
             $result = $work();

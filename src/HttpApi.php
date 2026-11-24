@@ -17,7 +17,9 @@ final class HttpApi
     private readonly WorkforceAccess $workforce;
     private readonly Attendance $attendance;
     private readonly AttendanceImports $attendanceImports;
+    private readonly AttendanceCertifications $attendanceCertifications;
     private readonly Leave $leave;
+    private readonly Payroll $payroll;
 
     public function __construct(private readonly Database $db)
     {
@@ -29,7 +31,9 @@ final class HttpApi
         $this->workforce = new WorkforceAccess($db, $operations);
         $this->attendance = new Attendance($db, $operations, $this->workforce);
         $this->attendanceImports = new AttendanceImports($db, $operations, $this->attendance);
+        $this->attendanceCertifications = new AttendanceCertifications($db, $operations, $this->workforce, $this->attendance);
         $this->leave = new Leave($db, $operations, $this->workforce);
+        $this->payroll = new Payroll($db, $operations, $this->attendance, $this->attendanceCertifications, new PayrollCalculator());
     }
 
     public function handle(string $method, string $path): array
@@ -166,7 +170,10 @@ final class HttpApi
         if (str_starts_with($resource, 'attendance/')) {
             return $this->attendanceRoute($method, $resource, $actor, $company, $input);
         }
-        if (preg_match('#^employments/([0-9]{1,19})/(account|manager|shifts|leave(?:/.*)?)$#D', $resource, $match)) {
+        if (str_starts_with($resource, 'payroll/')) {
+            return $this->payrollRoute($method, $resource, $actor, $company, $input);
+        }
+        if (preg_match('#^employments/([0-9]{1,19})/(account|manager|shifts|attendance-certifications|leave(?:/.*)?)$#D', $resource, $match)) {
             return $this->workforceRoute($method, $match[2], $actor, $company, Input::integer($match[1], 'employment_id'), $input);
         }
         if (preg_match('#^employments/([0-9]{1,19})(?:/(contracts|transfers|legal-transfers))?$#D', $resource, $match)) {
@@ -187,6 +194,28 @@ final class HttpApi
             throw new BusinessError(404, 'route_not_found');
         }
         return $this->position($method, $match[2], $actor, $company, Input::integer($match[1], 'position_id'), $input);
+    }
+
+    private function payrollRoute(string $method, string $resource, Access $actor, int $company, array $input): array
+    {
+        if ($method === 'POST' && $resource === 'payroll/rules') {
+            return [201, $this->payroll->createRule($actor, $company, $this->requestKey(), $input)];
+        }
+        if ($method === 'POST' && $resource === 'payroll/runs') {
+            return [201, $this->payroll->createRun($actor, $company, $this->requestKey(), $input)];
+        }
+        if ($method === 'GET' && preg_match('#^payroll/payslips/([0-9]{1,19})$#D', $resource, $match)) {
+            return [200, $this->payroll->payslip($actor, $company, Input::integer($match[1], 'payslip_id'))];
+        }
+        if (!preg_match('#^payroll/runs/([0-9]{1,19})(/trial)?$#D', $resource, $match)) {
+            throw new BusinessError(404, 'route_not_found');
+        }
+        $id = Input::integer($match[1], 'payroll_run_id');
+        return match ($method . ($match[2] ?? '')) {
+            'POST/trial' => [200, $this->payroll->trial($actor, $company, $id, $this->requestKey(), $input)],
+            'GET' => [200, $this->payroll->detail($actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0))],
+            default => throw new BusinessError(404, 'route_not_found'),
+        };
     }
 
     private function attendanceRoute(string $method, string $resource, Access $actor, int $company, array $input): array
@@ -252,6 +281,7 @@ final class HttpApi
             )],
             'manager' => [200, $this->workforce->assignManager($actor, $company, $employment, $key, $input)],
             'shifts' => [201, $this->attendance->schedule($actor, $company, $employment, $key, $input)],
+            'attendance-certifications' => [201, $this->attendanceCertifications->certify($actor, $company, $employment, $key, $input)],
             'leave' => [201, $this->leave->request($actor, $company, $employment, $key, $input)],
             'leave/grants' => [200, $this->leave->grant($actor, $company, $employment, $key, $input)],
             default => throw new BusinessError(404, 'route_not_found'),

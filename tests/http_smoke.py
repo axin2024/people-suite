@@ -164,6 +164,69 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     assert manager.call(leave + "?workday=2026-04-20")["balances"] == []
     assert employee.call(leave + "?workday=2026-04-20")["balances"][0]["available_minutes"] == 480
     assert [row["action"] for row in employee.call(request)["ledger"]] == ["reserve", "approve", "cancel"]
+    return manager, employee, imported_shift
+
+
+def payroll_trial(admin, origin, credentials, company, employment, department_id, finance, actors):
+    manager, employee, imported_shift = actors
+    _, maker = create_login(admin, origin, company, credentials, "payroll-maker", "payroll_maker")
+    _, reviewer = create_login(admin, origin, company, credentials, "payroll-reviewer", "payroll_reviewer")
+    payroll = company + "/payroll"
+    rule_input = {"rule_ref": "BASE-30", "title": "30 day demo", "proration_basis": "fixed_30"}
+    reviewer.call(payroll + "/rules", rule_input, key="blocked-rule", status=404)
+    rule = maker.call(payroll + "/rules", rule_input, key="demo-rule", status=201)["rule_id"]
+    period = {"period_start": "2026-04-01"}
+    run = maker.call(payroll + "/runs", period, key="april-run", status=201)
+    run_path = f"{payroll}/runs/{run['run_id']}"
+    manager.call(run_path, status=404)
+
+    cut = maker.call(company + "/attendance/watermark")["watermark"]
+    trial = {"version": run["version"], "rule_id": rule, "attendance_watermark": cut}
+    first = maker.call(run_path + "/trial", trial, key="blocked-trial")
+    missing = reviewer.call(run_path)["payslips"][0]
+    assert first["blocked_count"] == 1 and missing["facts"]["blocking_reason"] == "attendance_certificate_missing"
+    assert missing["net_minor"] is None
+
+    certification = {
+        "starts_on": "2026-04-01", "ends_before": "2026-05-01", "expected_shifts": 2,
+        "decision_ref": "APRIL-ATTENDANCE", "notes": "Roster and cutoff checked against fixture calendar",
+    }
+    certify_path = employment + "/attendance-certifications"
+    incomplete = admin.call(certify_path, certification, key="cert", status=409)
+    assert incomplete["error"] == "attendance_period_incomplete" and incomplete["details"]["blocking_count"] == 1
+    shift_path = f"{company}/attendance/shifts/{imported_shift}"
+    arrived = manager.call(shift_path)["attendance"]
+    manager.call(
+        shift_path + "/resolution",
+        {"version": arrived["version"], "state": "worked", "decision_ref": "WORKED-02", "explanation": "Recorded normal hours"},
+        key="confirm-import",
+    )
+    certified = admin.call(certify_path, certification, key="cert", status=201)
+    assert certified["worked_minutes"] == 960
+    second_input = {**trial, "version": first["version"], "attendance_watermark": certified["watermark"]}
+    second = maker.call(run_path + "/trial", second_input, key="valid-trial")
+    assert maker.call(run_path + "/trial", second_input, key="valid-trial") == second
+    assert second["eligible_count"] == 1 and second["blocked_count"] == 0 and second["gross_minor"] == 900000
+    payslips = reviewer.call(run_path)["payslips"]
+    payslip_path = f"{payroll}/payslips/{payslips[0]['id']}"
+    employee.call(payslip_path, status=404)
+    manager.call(payslip_path, status=404)
+    detail = reviewer.call(payslip_path)
+    assert detail["payslip"]["net_minor"] == 900000
+    assert detail["payslip"]["attendance_certification_id"] == certified["certification_id"]
+    assert [(row["department_id"], row["base_minor"], row["facts"]["days"]) for row in detail["segments"]] == [
+        (department_id, 450000, 15), (finance, 450000, 15),
+    ]
+
+    stale_shift = admin.call(
+        employment + "/shifts",
+        {"workday": "2026-04-24", "starts_at": "2026-04-24T09:00:00+08:00", "ends_at": "2026-04-24T17:00:00+08:00"},
+        key="late-schedule", status=201,
+    )
+    stale_input = {**trial, "version": second["version"], "attendance_watermark": stale_shift["watermark"]}
+    assert maker.call(run_path + "/trial", stale_input, key="stale-cert-trial")["blocked_count"] == 1
+    assert reviewer.call(run_path)["payslips"][0]["facts"]["blocking_reason"] == "attendance_certificate_stale"
+    assert reviewer.call(payslip_path) == detail
 
 
 def run(origin, group):
@@ -266,7 +329,8 @@ def run(origin, group):
     renewal = {"version": 1, "contract_ref": "C-002", "effective_from": "2026-05-01", "monthly_minor": 930000}
     assert admin.call(employment_path + "/contracts", renewal, key="renew")["version"] == 2
     assert [c["reference"] for c in admin.call(employment_path)["contracts"]] == ["C-001", "C-002"]
-    attendance_and_leave(admin, origin, credentials, company, employment_path)
+    actors = attendance_and_leave(admin, origin, credentials, company, employment_path)
+    payroll_trial(admin, origin, credentials, company, employment_path, department_id, finance, actors)
 
     target_id = admin.call(
         "/api/companies",
@@ -323,7 +387,7 @@ def run(origin, group):
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, night shift reconciliation, leave balance racing, and legal transfer passed.")
+    print("HTTP recruitment, employment, attendance, leave, two-party legal transfer, and segmented payroll trials passed.")
 
 
 if __name__ == "__main__":

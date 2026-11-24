@@ -144,3 +144,16 @@
 `GET /runs/{id}/department-costs` 返回该账期最近一次试算的部门分摊、差额、状态和封账摘要。原工资成本按任职分段归属，补差按原工资行部门归属。未完成的试算同时返回阻断人数。
 
 `GET /api/payroll/department-costs?period_start=2026-04-01` 汇总各法人已封账或已发布的当月成本，按币种分别给出合计。两种查看方式均向制单与复核角色开放，返回范围以法人授权为准。
+
+### 文件下载
+
+以下 `GET` 路径使用对应查询接口的角色和对象权限，返回 UTF-8 CSV 附件。工资单分列正常工资和追溯补差。带分页的下载支持与查询相同的 `after` 游标。
+
+| 路径 | 访问范围 |
+| --- | --- |
+| `/payslips/{id}.csv` | 制单或复核角色，所属法人。 |
+| `/my-payslips/{id}.csv` | 员工已发布的本人工资单。 |
+| `/runs/{id}/department-costs.csv` | 制单或复核角色，所属法人。 |
+| `/api/payroll/department-costs.csv?period_start=2026-04-01` | 具备薪酬权限的法人已封账数据，按币种合计。 |
+| `/inquiries.csv?state=acknowledged` | 薪酬复核人，本法人核对结果。 |
+| `/my-payslips/{id}/inquiries.csv` | 员工针对本人已发布工资单发起的核对记录。 |

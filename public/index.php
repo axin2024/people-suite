@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PeopleSuite\BusinessError;
+use PeopleSuite\CsvDownload;
 use PeopleSuite\Database;
 use PeopleSuite\HttpApi;
 
@@ -28,4 +29,8 @@ try {
     $body = $path === '/healthz' ? ['ready' => false] : ['error' => 'request_failed'];
 }
 http_response_code($status);
+if ($body instanceof CsvDownload) {
+    $body->send();
+    return;
+}
 echo json_encode($body, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);

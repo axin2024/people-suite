@@ -115,8 +115,9 @@ final class HttpApi
 
     private function route(string $method, string $path, Access $actor, array $input): array
     {
-        if ($method === 'GET' && $path === '/api/payroll/department-costs') {
-            return [200, $this->payrollCosts->forPeriod($actor, $_GET['period_start'] ?? null)];
+        if ($method === 'GET' && in_array($path, ['/api/payroll/department-costs', '/api/payroll/department-costs.csv'], true)) {
+            $report = $this->payrollCosts->forPeriod($actor, $_GET['period_start'] ?? null);
+            return [200, str_ends_with($path, '.csv') ? PayrollExports::costs($report['companies'], $report['totals_by_currency']) : $report];
         }
         if ($method === 'GET' && $path === '/api/companies') {
             return [200, ['companies' => $this->db->rows(
@@ -215,29 +216,33 @@ final class HttpApi
         if ($method === 'POST' && $resource === 'payroll/runs') {
             return [201, $this->payroll->createRun($actor, $company, $this->requestKey(), $input)];
         }
-        if ($method === 'GET' && preg_match('#^payroll/payslips/([0-9]{1,19})$#D', $resource, $match)) {
-            return [200, $this->payroll->payslip($actor, $company, Input::integer($match[1], 'payslip_id'))];
+        if ($method === 'GET' && preg_match('#^payroll/payslips/([0-9]{1,19})(\.csv)?$#D', $resource, $match)) {
+            $payslip = $this->payroll->payslip($actor, $company, Input::integer($match[1], 'payslip_id'));
+            return [200, isset($match[2]) ? PayrollExports::payslip($payslip) : $payslip];
         }
         if ($method === 'GET' && $resource === 'payroll/my-payslips') {
             return [200, ['payslips' => $this->payroll->myPayslips($actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0))]];
         }
-        if ($method === 'GET' && preg_match('#^payroll/my-payslips/([0-9]{1,19})$#D', $resource, $match)) {
-            return [200, $this->payroll->myPayslip($actor, $company, Input::integer($match[1], 'payslip_id'))];
+        if ($method === 'GET' && preg_match('#^payroll/my-payslips/([0-9]{1,19})(\.csv)?$#D', $resource, $match)) {
+            $payslip = $this->payroll->myPayslip($actor, $company, Input::integer($match[1], 'payslip_id'));
+            return [200, isset($match[2]) ? PayrollExports::payslip($payslip) : $payslip];
         }
-        if (preg_match('#^payroll/my-payslips/([0-9]{1,19})/inquiries$#D', $resource, $match)) {
+        if (preg_match('#^payroll/my-payslips/([0-9]{1,19})/inquiries(\.csv)?$#D', $resource, $match)) {
             $payslip = Input::integer($match[1], 'payslip_id');
-            return match ($method) {
-                'GET' => [200, ['inquiries' => $this->payrollInquiries->forEmployee(
-                    $actor, $company, $payslip, Input::integer($_GET['after'] ?? 0, 'after', 0),
-                )]],
-                'POST' => [201, $this->payrollInquiries->open($actor, $company, $payslip, $this->requestKey(), $input)],
-                default => throw new BusinessError(404, 'route_not_found'),
-            };
+            if ($method === 'GET') {
+                $inquiries = $this->payrollInquiries->forEmployee($actor, $company, $payslip, Input::integer($_GET['after'] ?? 0, 'after', 0));
+                return [200, isset($match[2]) ? PayrollExports::inquiries($inquiries, employeeView: true) : ['inquiries' => $inquiries]];
+            }
+            if ($method === 'POST' && !isset($match[2])) {
+                return [201, $this->payrollInquiries->open($actor, $company, $payslip, $this->requestKey(), $input)];
+            }
+            throw new BusinessError(404, 'route_not_found');
         }
-        if ($method === 'GET' && $resource === 'payroll/inquiries') {
-            return [200, ['inquiries' => $this->payrollInquiries->reviewQueue(
+        if ($method === 'GET' && in_array($resource, ['payroll/inquiries', 'payroll/inquiries.csv'], true)) {
+            $inquiries = $this->payrollInquiries->reviewQueue(
                 $actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0), $_GET['state'] ?? null,
-            )]];
+            );
+            return [200, str_ends_with($resource, '.csv') ? PayrollExports::inquiries($inquiries) : ['inquiries' => $inquiries]];
         }
         if ($method === 'POST' && preg_match('#^payroll/inquiries/([0-9]{1,19})/(answer|acknowledge)$#D', $resource, $match)) {
             $inquiry = Input::integer($match[1], 'inquiry_id');
@@ -246,7 +251,7 @@ final class HttpApi
                 ? $this->payrollInquiries->answer($actor, $company, $inquiry, $key, $input)
                 : $this->payrollInquiries->acknowledge($actor, $company, $inquiry, $key, $input)];
         }
-        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments|department-costs))?$#D', $resource, $match)) {
+        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments|department-costs(?:\.csv)?))?$#D', $resource, $match)) {
             throw new BusinessError(404, 'route_not_found');
         }
         $id = Input::integer($match[1], 'payroll_run_id');
@@ -258,6 +263,7 @@ final class HttpApi
             )],
             'GET/verify-closure' => [200, $this->payroll->verifyClosure($actor, $company, $id)],
             'GET/department-costs' => [200, $this->payrollCosts->forRun($actor, $company, $id)],
+            'GET/department-costs.csv' => [200, PayrollExports::costs([$this->payrollCosts->forRun($actor, $company, $id)])],
             'GET/' => [200, $this->payroll->detail($actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0))],
             default => throw new BusinessError(404, 'route_not_found'),
         };

@@ -1,7 +1,9 @@
 """Exercise the organization and recruitment API over HTTP against an isolated database."""
 
 from concurrent.futures import ThreadPoolExecutor
+import csv
 import http.cookiejar
+import io
 import json
 import os
 import re
@@ -44,6 +46,16 @@ class Session:
         if "csrf_token" in payload:
             self.csrf = payload["csrf_token"]
         return payload
+
+    def download(self, path, filename):
+        request = urllib.request.Request(self.origin + path, headers={"Accept": "text/csv"})
+        with self.client.open(request, timeout=10) as response:
+            assert response.code == 200
+            assert response.headers.get_content_type() == "text/csv"
+            assert response.headers.get_filename() == filename
+            assert "no-store" in response.headers["Cache-Control"]
+            stream = io.StringIO(response.read().decode("utf-8-sig"), newline="")
+            return list(csv.DictReader(stream))
 
 
 def create_login(admin, origin, company, credentials, name, role):
@@ -289,10 +301,21 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     assert archived["totals_by_currency"] == [{
         "currency": "CNY", "company_count": 1, "base_cost_minor": 900000, "adjustment_minor": 0, "total_cost_minor": 900000,
     }]
+    group_csv = reviewer.download(group_costs.replace("?", ".csv?"), "department-costs.csv")
+    assert [(row["entry_type"], row["total_cost_minor"]) for row in group_csv] == [
+        ("company", "900000"), ("department", "450000"), ("department", "450000"), ("currency", "900000"),
+    ]
+    salary_csv = employee.download(employee_view + ".csv", f"payslip-{final[0]['id']}.csv")
+    assert salary_csv[0]["digest"] == closed["digest"] and salary_csv[0]["payable_minor"] == "900000"
+    assert [row["gross_minor"] for row in salary_csv[1:]] == ["450000", "450000"]
+    reviewer.download(payslip_path + ".csv", f"payslip-{payslips[0]['id']}.csv")
+    manager.call(payslip_path + ".csv", status=404)
+    manager.call(cost_path + ".csv", status=404)
     manager.call(employee_view, status=404)
     _, other_employee = create_login(admin, origin, company, credentials, "other-employee", "employee")
     assert other_employee.call(payroll + "/my-payslips")["payslips"] == []
     other_employee.call(employee_view, status=404)
+    other_employee.call(employee_view + ".csv", status=404)
     return maker, reviewer, employee, other_employee, run_path, final[0]["id"], closed["digest"]
 
 
@@ -365,6 +388,11 @@ def retro_trial(company, original, department_id):
     entry, = may_cost["departments"]
     assert entry["department_id"] == department_id and entry["adjustment_count"] == 1
     assert may_cost["base_cost_minor"] == 0 and may_cost["total_cost_minor"] == entry["adjustment_minor"] == 30000
+    adjustment_csv = reviewer.download(may_path + "/department-costs.csv", "department-costs.csv")
+    assert adjustment_csv[1]["department_id"] == str(department_id) and adjustment_csv[1]["adjustment_minor"] == "30000"
+    salary_csv = employee.download(may_slip_path + ".csv", f"payslip-{new_id}.csv")
+    assert salary_csv[1]["entry_type"] == "adjustment" and salary_csv[1]["decision_ref"] == adjustment["decision_ref"]
+    assert salary_csv[1]["original_payslip_id"] == str(original_id) and salary_csv[1]["payable_minor"] == "30000"
     april_cost = reviewer.call(april_path + "/department-costs")
     assert april_cost["total_cost_minor"] == 900000 and april_cost["adjustment_minor"] == 0
 
@@ -375,7 +403,7 @@ def payslip_inquiries(company, original, manager, receiving, target):
     payslip = f"{payroll}/my-payslips/{payslip_id}"
     path = payslip + "/inquiries"
     before = employee.call(payslip)
-    question = {"reference": "APRIL-SPLIT", "category": "base_pay", "question": "Why does April show two lines?"}
+    question = {"reference": "APRIL-SPLIT", "category": "base_pay", "question": "=1+1\nWhy does April show two lines?"}
     assert employee.call(path)["inquiries"] == []
     other_employee.call(path, question, key="other-question", status=404)
     inquiry = employee.call(path, question, key="april-question", status=201)
@@ -407,6 +435,12 @@ def payslip_inquiries(company, original, manager, receiving, target):
     assert closed["state"] == "acknowledged" and closed["version"] == 3
     assert reviewer.call(payroll + "/inquiries?state=open")["inquiries"] == []
     assert reviewer.call(payroll + "/inquiries?state=acknowledged")["inquiries"][0]["acknowledged_at"]
+    review_csv, = reviewer.download(payroll + "/inquiries.csv?state=acknowledged", "payslip-inquiries.csv")
+    assert review_csv["state"] == "acknowledged" and review_csv["question"] == "'" + question["question"]
+    employee_csv, = employee.download(path + ".csv", "payslip-inquiries.csv")
+    assert employee_csv["answer"] == response["answer"] and "answered_by" not in employee_csv
+    manager.call(payroll + "/inquiries.csv", status=404)
+    other_employee.call(path + ".csv", status=404)
     assert employee.call(payslip) == before
     verified = reviewer.call(april_path + "/verify-closure")
     assert verified["valid"] and verified["digest"] == digest
@@ -576,7 +610,7 @@ def run(origin, group):
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll close, release, adjustments, inquiries and cost reports passed.")
+    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll close, release, adjustments, inquiries, costs and CSV passed.")
 
 
 if __name__ == "__main__":

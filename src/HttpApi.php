@@ -127,15 +127,10 @@ final class HttpApi
             return str_ends_with($path, '.csv') ? $this->groupCostDownload($actor, $report) : [200, $report];
         }
         if ($method === 'GET' && $path === '/api/companies') {
-            return [200, ['companies' => $this->db->rows(
-                'SELECT c.id, c.code, c.name, c.timezone, c.currency
-                 FROM companies c WHERE c.group_id=? AND (
-                    EXISTS (SELECT 1 FROM company_roles r WHERE r.group_id=c.group_id AND r.company_id=c.id AND r.account_id=?)
-                    OR EXISTS (SELECT 1 FROM group_administrators a WHERE a.group_id=c.group_id AND a.account_id=?)
-                    OR EXISTS (SELECT 1 FROM archived_employment_access x WHERE x.group_id=c.group_id AND x.company_id=c.id AND x.account_id=?)
-                 ) ORDER BY c.code, c.id',
-                [$actor->groupId, $actor->accountId, $actor->accountId, $actor->accountId],
-            )]];
+            return [200, ['companies' => $this->companies($actor)]];
+        }
+        if ($method === 'GET' && $path === '/api/workspace') {
+            return [200, $this->workspace($actor)];
         }
         if ($method === 'POST' && $path === '/api/companies') {
             return [201, $this->organization->createCompany(
@@ -163,6 +158,11 @@ final class HttpApi
         if ($method === 'GET' && $resource === 'departments') {
             return [200, ['departments' => $this->organization->departments(
                 $actor, $company, Input::date($_GET['on'] ?? null, 'on'),
+            )]];
+        }
+        if ($method === 'GET' && $resource === 'employments') {
+            return [200, ['employments' => $this->employment->directory(
+                $actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0),
             )]];
         }
         if ($method === 'POST' && $resource === 'roles') {
@@ -223,6 +223,44 @@ final class HttpApi
             throw new BusinessError(404, 'route_not_found');
         }
         return $this->position($method, $match[2], $actor, $company, Input::integer($match[1], 'position_id'), $input);
+    }
+
+    private function companies(Access $actor): array
+    {
+        return $this->db->rows(
+            'SELECT c.id, c.code, c.name, c.timezone, c.currency
+             FROM companies c WHERE c.group_id=? AND (
+                EXISTS (SELECT 1 FROM company_roles r WHERE r.group_id=c.group_id AND r.company_id=c.id AND r.account_id=?)
+                OR EXISTS (SELECT 1 FROM group_administrators a WHERE a.group_id=c.group_id AND a.account_id=?)
+                OR EXISTS (SELECT 1 FROM archived_employment_access x WHERE x.group_id=c.group_id AND x.company_id=c.id AND x.account_id=?)
+             ) ORDER BY c.code, c.id',
+            [$actor->groupId, $actor->accountId, $actor->accountId, $actor->accountId],
+        );
+    }
+
+    private function workspace(Access $actor): array
+    {
+        $scope = [$actor->groupId, $actor->accountId];
+        $principal = $this->db->row(
+            'SELECT a.id AS account_id, a.display_name, g.code AS group_code, g.name AS group_name
+             FROM accounts a JOIN hcm_groups g ON g.id=a.group_id WHERE a.group_id=? AND a.id=?',
+            $scope,
+        );
+        $roles = [];
+        foreach ($this->db->rows('SELECT company_id, role FROM company_roles WHERE group_id=? AND account_id=? ORDER BY role', $scope) as $row) {
+            $roles[$row['company_id']][] = $row['role'];
+        }
+        $archive = array_fill_keys(array_column($this->db->rows(
+            'SELECT DISTINCT company_id FROM archived_employment_access WHERE group_id=? AND account_id=?',
+            $scope,
+        ), 'company_id'), true);
+        $companies = $this->companies($actor);
+        foreach ($companies as &$company) {
+            $company['roles'] = $roles[$company['id']] ?? [];
+            $company['archive'] = $archive[$company['id']] ?? false;
+        }
+        unset($company);
+        return [...$principal, 'group_admin' => $actor->isAdministrator(), 'companies' => $companies];
     }
 
     private function payrollRoute(string $method, string $resource, Access $actor, int $company, array $input): array

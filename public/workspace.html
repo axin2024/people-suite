@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>People Suite · 人力资源工作台</title>
+    <link rel="stylesheet" href="/workspace.css">
+    <script type="module" src="/workspace.js"></script>
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="/">People<span>Suite</span></a>
+        <div class="session-tools" id="session-tools" hidden>
+            <label for="company">当前法人</label>
+            <select id="company"></select>
+            <span id="principal"></span>
+            <button type="button" class="subtle" id="logout">退出</button>
+        </div>
+    </header>
+    <main id="entrance" class="entrance">
+        <section class="signin">
+            <h1>登录人力资源工作台</h1>
+            <form id="login">
+                <label>集团代码<input name="group" autocomplete="organization" maxlength="48" required></label>
+                <label>邮箱<input name="email" type="email" autocomplete="username" maxlength="254" required></label>
+                <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+                <button type="submit">登录</button>
+            </form>
+            <p class="alert" id="login-error" role="alert" hidden></p>
+        </section>
+    </main>
+    <div id="workspace" class="workspace" hidden>
+        <aside class="sidebar">
+            <p id="group-name" class="group-name"></p>
+            <nav id="sections" aria-label="工作台导航"></nav>
+        </aside>
+        <main class="content" id="content" tabindex="-1">
+            <header class="section-head">
+                <h1 id="section-title" tabindex="-1"></h1>
+                <div id="section-tools" class="section-tools"></div>
+            </header>
+            <p id="notice" role="status" class="notice" hidden></p>
+            <div id="view"></div>
+        </main>
+    </div>
+</body>
+</html>

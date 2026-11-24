@@ -15,11 +15,16 @@ final class Access
 
     public function administrator(): void
     {
-        if ($this->db->row('SELECT 1 FROM group_administrators WHERE group_id=? AND account_id=?', [
-            $this->groupId, $this->accountId,
-        ]) === null) {
+        if (!$this->isAdministrator()) {
             throw new BusinessError(403, 'group_admin_required');
         }
+    }
+
+    public function isAdministrator(): bool
+    {
+        return $this->db->row('SELECT 1 FROM group_administrators WHERE group_id=? AND account_id=?', [
+            $this->groupId, $this->accountId,
+        ]) !== null;
     }
 
     public function company(int $companyId, string ...$allowed): void

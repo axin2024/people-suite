@@ -255,6 +255,17 @@ final class Employment
         );
     }
 
+    public function directory(Access $actor, int $company, int $after): array
+    {
+        $actor->company($company, 'hr');
+        return $this->db->rows(
+            'SELECT w.id, e.employee_code, e.display_name, w.starts_on, w.ends_before, w.assignment_version
+             FROM employments w JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
+             WHERE w.group_id=? AND w.company_id=? AND w.id>? ORDER BY w.id LIMIT 100',
+            [$actor->groupId, $company, $after],
+        );
+    }
+
     public function history(Access $actor, int $company, int $id): array
     {
         $actor->company($company, 'hr');

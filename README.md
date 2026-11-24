@@ -22,7 +22,7 @@ php bin/hcm.php create-group north-demo "北岸集团" admin@example.test "演�
 php -S 127.0.0.1:8080 -t public public/index.php
 ```
 
-健康探针为 `GET /healthz`。登录、创建法人及招聘审批入口见 [HTTP API](docs/http-api.md)。
+打开 `http://127.0.0.1:8080/` 进入工作台。集团管理员可创建法人和授予角色，HR 可查任职档案、审核员工申请和办理离职，员工可查看本人资料、申请和已发布账单。接口调用方式见 [HTTP API](docs/http-api.md)。健康探针为 `GET /healthz`。
 
 ## 验证
 

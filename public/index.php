@@ -15,6 +15,21 @@ $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 header('Cache-Control: no-store');
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: no-referrer');
+
+$workspaceFiles = [
+    '/' => ['workspace.html', 'text/html'],
+    '/workspace.js' => ['workspace.js', 'text/javascript'],
+    '/workspace.css' => ['workspace.css', 'text/css'],
+];
+if ($method === 'GET' && isset($workspaceFiles[$path])) {
+    [$file, $type] = $workspaceFiles[$path];
+    header("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+        . "base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+    header("Content-Type: {$type}; charset=utf-8");
+    readfile(__DIR__ . '/' . $file);
+    return;
+}
+
 header("Content-Security-Policy: default-src 'none'; base-uri 'none'; frame-ancestors 'none'");
 header('Content-Type: application/json; charset=utf-8');
 

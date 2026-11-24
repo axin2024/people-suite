@@ -769,7 +769,14 @@ def run(origin, group):
     password = "Fixture-hcm-pass-99"
     admin = Session(origin)
     assert admin.call("/healthz") == {"ready": True}
+    with urllib.request.urlopen(origin, timeout=10) as home:
+        assert home.headers.get_content_type() == "text/html"
+        assert "frame-ancestors 'none'" in home.headers["Content-Security-Policy"]
+        assert "登录人力资源工作台" in home.read().decode("utf-8")
+    with urllib.request.urlopen(origin + "/workspace.js", timeout=10) as script:
+        assert script.headers.get_content_type() == "text/javascript"
     assert not admin.call("/api/session")["authenticated"]
+    admin.call("/api/workspace", status=401)
     credentials = {"group": group, "email": "http-admin@example.test", "password": password}
     assert admin.call("/api/login", credentials, status=403, invalid_csrf=True)["error"] == "invalid_csrf_token"
     login = admin.call("/api/login", credentials)
@@ -782,6 +789,10 @@ def run(origin, group):
     )["company_id"]
     company = f"/api/companies/{company_id}"
     admin.call(company + "/roles", {"account_id": admin_id, "role": "hr"})
+    workspace = admin.call("/api/workspace")
+    assert workspace["account_id"] == admin_id and workspace["group_code"] == group and workspace["group_admin"]
+    assert workspace["companies"][0]["id"] == company_id and workspace["companies"][0]["roles"] == ["hr"]
+    assert admin.call(company + "/employments")["employments"] == []
     department_id = admin.call(
         company + "/departments",
         {"code": "OPS", "name": "Operations", "effective_from": "2026-04-01"},
@@ -935,6 +946,11 @@ def run(origin, group):
     receiving.call(original_payroll[4] + "/department-costs", status=404)
     archived_download = departure(admin, origin, credentials, target, employee_session, received["employment_id"], company)
     verify_export_audit(login["group_id"], archived_download)
+    archived_company, = [entry for entry in employee_session.call("/api/workspace")["companies"] if entry["id"] == target_id]
+    assert archived_company["archive"] and archived_company["roles"] == []
+    former_employment, = admin.call(target + "/employments")["employments"]
+    assert former_employment["id"] == received["employment_id"] and former_employment["ends_before"] == "2026-05-16"
+    employee_session.call(target + "/employments", status=404)
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)

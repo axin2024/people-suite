@@ -12,6 +12,7 @@
 | POST `/api/login` | `group`、`email`、`password`。 |
 | POST `/api/logout` | 空对象。 |
 | GET `/api/companies` | 当前账户可见的法人。 |
+| GET `/api/workspace` | 当前账号和集团显示信息、可见法人、法人内角色及历史单据权限。 |
 | POST `/api/companies` | 集团管理员传入 `code`、`name`、`timezone`、`currency`。 |
 | POST `/api/accounts` | 集团管理员传入 `email`、`display_name`、`password`。 |
 | POST `/api/companies/{company}/roles` | 集团管理员传入 `account_id`、`role`。 |
@@ -48,6 +49,7 @@
 
 | 方法与后缀 | 请求字段与说明 |
 | --- | --- |
+| GET `/employments` | HR 查看当前法人的任职目录，支持 `after=ID`。 |
 | GET `/employments/{id}` | 查询人事档案、任职时间线和合同版本。可加 `?on=2026-04-16` 获取该日任职段。 |
 | POST `/employments/{id}/contracts` | 键。提交当前合同 `version`、`contract_ref`、`effective_from`、`monthly_minor`、可选 `ends_before`。续签新增版本。 |
 | POST `/employments/{id}/transfers` | 键。提交 `assignment_version`、目标 `position_id`、`effective_from`。返回任职分段及需复核的假勤和成本期间。 |

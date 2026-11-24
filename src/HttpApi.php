@@ -23,6 +23,7 @@ final class HttpApi
     private readonly PayrollAdjustments $payrollAdjustments;
     private readonly PayrollInquiries $payrollInquiries;
     private readonly PayrollCosts $payrollCosts;
+    private readonly Performance $performance;
 
     public function __construct(private readonly Database $db)
     {
@@ -42,6 +43,7 @@ final class HttpApi
         );
         $this->payrollInquiries = new PayrollInquiries($db, $operations, $this->payroll);
         $this->payrollCosts = new PayrollCosts($db);
+        $this->performance = new Performance($db, $operations, $this->workforce);
     }
 
     public function handle(string $method, string $path): array
@@ -185,6 +187,9 @@ final class HttpApi
         if (str_starts_with($resource, 'payroll/')) {
             return $this->payrollRoute($method, $resource, $actor, $company, $input);
         }
+        if (str_starts_with($resource, 'performance/')) {
+            return $this->performanceRoute($method, $resource, $actor, $company, $input);
+        }
         if (preg_match('#^employments/([0-9]{1,19})/(account|manager|shifts|attendance-certifications|leave(?:/.*)?)$#D', $resource, $match)) {
             return $this->workforceRoute($method, $match[2], $actor, $company, Input::integer($match[1], 'employment_id'), $input);
         }
@@ -265,6 +270,43 @@ final class HttpApi
             'GET/department-costs' => [200, $this->payrollCosts->forRun($actor, $company, $id)],
             'GET/department-costs.csv' => [200, PayrollExports::costs([$this->payrollCosts->forRun($actor, $company, $id)])],
             'GET/' => [200, $this->payroll->detail($actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0))],
+            default => throw new BusinessError(404, 'route_not_found'),
+        };
+    }
+
+    private function performanceRoute(string $method, string $resource, Access $actor, int $company, array $input): array
+    {
+        if ($resource === 'performance/cycles') {
+            return match ($method) {
+                'GET' => [200, ['cycles' => $this->performance->cycles($actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0))]],
+                'POST' => [201, $this->performance->create($actor, $company, $this->requestKey(), $input)],
+                default => throw new BusinessError(404, 'route_not_found'),
+            };
+        }
+        if (preg_match('#^performance/cycles/([0-9]{1,19})(?:/(participants|advance))?$#D', $resource, $match)) {
+            $cycle = Input::integer($match[1], 'cycle_id');
+            return match ($method . '/' . ($match[2] ?? '')) {
+                'GET/' => [200, $this->performance->detail($actor, $company, $cycle, Input::integer($_GET['after'] ?? 0, 'after', 0))],
+                'POST/participants' => [201, $this->performance->enroll($actor, $company, $cycle, $this->requestKey(), $input)],
+                'POST/advance' => [200, $this->performance->advance($actor, $company, $cycle, $this->requestKey(), $input)],
+                default => throw new BusinessError(404, 'route_not_found'),
+            };
+        }
+        if (!preg_match('#^performance/cycles/([0-9]{1,19})/participants/([0-9]{1,19})'
+            . '(?:/(goals|confirm-goals|self-assessment|evaluation|calibration|amendment))?$#D', $resource, $match)) {
+            throw new BusinessError(404, 'route_not_found');
+        }
+        $cycle = Input::integer($match[1], 'cycle_id');
+        $participant = Input::integer($match[2], 'participant_id');
+        $action = $match[3] ?? '';
+        return match ($method . '/' . $action) {
+            'GET/' => [200, $this->performance->view($actor, $company, $cycle, $participant)],
+            'POST/goals', 'POST/confirm-goals', 'POST/self-assessment' => [200, $this->performance->updateParticipant(
+                $actor, $company, $cycle, $participant, $action, $this->requestKey(), $input,
+            )],
+            'POST/evaluation', 'POST/calibration', 'POST/amendment' => [201, $this->performance->recordRevision(
+                $actor, $company, $cycle, $participant, $action === 'evaluation' ? 'manager' : $action, $this->requestKey(), $input,
+            )],
             default => throw new BusinessError(404, 'route_not_found'),
         };
     }

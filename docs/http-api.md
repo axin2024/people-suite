@@ -157,3 +157,24 @@
 | `/api/payroll/department-costs.csv?period_start=2026-04-01` | 具备薪酬权限的法人已封账数据，按币种合计。 |
 | `/inquiries.csv?state=acknowledged` | 薪酬复核人，本法人核对结果。 |
 | `/my-payslips/{id}/inquiries.csv` | 员工针对本人已发布工资单发起的核对记录。 |
+
+## 绩效周期
+
+路径以 `/api/companies/{company}/performance/cycles` 开头。周期依次经历 `goals`、`evaluation`、`calibration` 与 `finalized`。HR 负责建期、入组、校准和定稿。入组按所选生效日记录任职和直属主管，主管交接后的权限随新周期重新确定。
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| GET `/` | 返回授权周期，支持 `after=ID`。 |
+| POST `/` | 键。HR 传 `reference`、`title`、`starts_on`、`ends_before`。 |
+| GET `/{cycle}` | 查询周期及授权参加人，支持 `after=ID`。 |
+| POST `/{cycle}/participants` | 键。HR 传 `employment_id`、`scope_on`，录入期间内有任职、员工账号和主管的参加人。 |
+| POST `/{cycle}/advance` | 键。HR 传周期 `version`、`decision_ref`，推进下一阶段。当前阶段仍有待办时返回数量。 |
+| GET `/{cycle}/participants/{id}` | 查询个人目标、自评与可见的评价修订。员工定稿后看到已发布结果和反馈。 |
+| POST `/{cycle}/participants/{id}/goals` | 键。本人或直属主管传参加人 `version`、`goals`。每项目标包含 `code`、`title`、`target`、`weight_bps`，总权重为 10000。 |
+| POST `/{cycle}/participants/{id}/confirm-goals` | 键。直属主管传 `version`、`decision_ref` 确认并冻结目标。 |
+| POST `/{cycle}/participants/{id}/self-assessment` | 键。员工在主管提交评价前传 `version`、`assessment`。 |
+| POST `/{cycle}/participants/{id}/evaluation` | 键。直属主管传 `version`、`decision_ref`、`feedback` 和覆盖全部目标的 `goal_scores` 列表，列表元素为 `code` 与 `score`。 |
+| POST `/{cycle}/participants/{id}/calibration` | 键。独立 HR 传 `version`、`decision_ref`、`score`、`feedback`、`rationale`。校准说明仅向 HR 可见。 |
+| POST `/{cycle}/participants/{id}/amendment` | 键。定稿后由独立 HR 以相同字段追加修订，保留此前发布结果。 |
+
+评分为 0 至 100。主管评分按已确认目标权重汇总，四舍五入至整数。参加人本人和原评分主管须回避对该记录的 HR 校准。

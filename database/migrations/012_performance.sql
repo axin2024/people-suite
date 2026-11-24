@@ -1,0 +1,75 @@
+CREATE TABLE IF NOT EXISTS performance_cycles (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    group_id BIGINT UNSIGNED NOT NULL,
+    company_id BIGINT UNSIGNED NOT NULL,
+    reference VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    title VARCHAR(160) NOT NULL,
+    starts_on DATE NOT NULL,
+    ends_before DATE NOT NULL,
+    state VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'goals',
+    version INT UNSIGNED NOT NULL DEFAULT 1,
+    created_by BIGINT UNSIGNED NOT NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    finalized_at DATETIME(6) NULL,
+    UNIQUE KEY uq_performance_cycle_scope (group_id, company_id, id),
+    UNIQUE KEY uq_performance_cycle_ref (group_id, company_id, reference),
+    FOREIGN KEY (group_id, company_id) REFERENCES companies (group_id, id),
+    FOREIGN KEY (group_id, created_by) REFERENCES accounts (group_id, id),
+    CHECK (starts_on<ends_before),
+    CHECK (state IN ('goals','evaluation','calibration','finalized')),
+    CHECK ((state='finalized')=(finalized_at IS NOT NULL))
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS performance_participants (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    group_id BIGINT UNSIGNED NOT NULL,
+    company_id BIGINT UNSIGNED NOT NULL,
+    cycle_id BIGINT UNSIGNED NOT NULL,
+    employment_id BIGINT UNSIGNED NOT NULL,
+    assignment_id BIGINT UNSIGNED NOT NULL,
+    employee_account_id BIGINT UNSIGNED NOT NULL,
+    manager_account_id BIGINT UNSIGNED NOT NULL,
+    scope_on DATE NOT NULL,
+    employee_code VARCHAR(48) CHARACTER SET ascii NOT NULL,
+    employee_name VARCHAR(160) NOT NULL,
+    goals JSON NOT NULL,
+    goal_confirmed_at DATETIME(6) NULL,
+    self_assessment VARCHAR(2000) NULL,
+    latest_revision INT UNSIGNED NOT NULL DEFAULT 0,
+    version INT UNSIGNED NOT NULL DEFAULT 1,
+    UNIQUE KEY uq_performance_participant_scope (group_id, company_id, cycle_id, id),
+    UNIQUE KEY uq_performance_participant_subject (group_id, company_id, cycle_id, employment_id),
+    KEY ix_performance_employee (group_id, company_id, employee_account_id, cycle_id, id),
+    KEY ix_performance_manager (group_id, company_id, manager_account_id, cycle_id, id),
+    FOREIGN KEY (group_id, company_id, cycle_id) REFERENCES performance_cycles (group_id, company_id, id),
+    FOREIGN KEY (group_id, company_id, employment_id) REFERENCES employments (group_id, company_id, id),
+    FOREIGN KEY (assignment_id) REFERENCES assignments (id),
+    FOREIGN KEY (group_id, employee_account_id) REFERENCES accounts (group_id, id),
+    FOREIGN KEY (group_id, manager_account_id) REFERENCES accounts (group_id, id),
+    CHECK (employee_account_id<>manager_account_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS performance_revisions (
+    group_id BIGINT UNSIGNED NOT NULL,
+    company_id BIGINT UNSIGNED NOT NULL,
+    cycle_id BIGINT UNSIGNED NOT NULL,
+    participant_id BIGINT UNSIGNED NOT NULL,
+    revision INT UNSIGNED NOT NULL,
+    kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    score TINYINT UNSIGNED NOT NULL,
+    goal_scores JSON NULL,
+    feedback VARCHAR(2000) NOT NULL,
+    rationale VARCHAR(1200) NULL,
+    decision_ref VARCHAR(48) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    recorded_by BIGINT UNSIGNED NOT NULL,
+    recorded_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (group_id, company_id, cycle_id, participant_id, revision),
+    UNIQUE KEY uq_performance_decision (group_id, company_id, cycle_id, participant_id, decision_ref),
+    FOREIGN KEY (group_id, company_id, cycle_id, participant_id)
+        REFERENCES performance_participants (group_id, company_id, cycle_id, id),
+    FOREIGN KEY (group_id, recorded_by) REFERENCES accounts (group_id, id),
+    CHECK (score<=100),
+    CHECK ((kind='manager' AND revision=1 AND goal_scores IS NOT NULL AND rationale IS NULL)
+        OR (kind='calibration' AND revision=2 AND goal_scores IS NULL AND rationale IS NOT NULL)
+        OR (kind='amendment' AND revision>2 AND goal_scores IS NULL AND rationale IS NOT NULL))
+) ENGINE=InnoDB;

@@ -78,6 +78,7 @@ export function field(label, name, options = {}) {
     const wrapper = node("label", label, options.wide ? "wide" : "");
     const input = node(options.choices ? "select" : options.multiline ? "textarea" : "input");
     if (options.choices) {
+        input.setAttribute("aria-label", label);
         for (const [value, title] of options.choices) input.append(new Option(title, value));
     } else if (!options.multiline) {
         input.type = options.type ?? "text";

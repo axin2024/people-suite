@@ -205,6 +205,30 @@ final class Recruitment
         });
     }
 
+    public function requisitions(Access $actor, int $company, int $position, int $after): array
+    {
+        $actor->recruitment($company, $position);
+        return $this->db->rows(
+            'SELECT id, proposed_start, justification, state, version FROM requisitions
+             WHERE group_id=? AND company_id=? AND position_id=? AND id>? ORDER BY id LIMIT 100',
+            [$actor->groupId, $company, $position, $after],
+        );
+    }
+
+    public function requisitionApplications(Access $actor, int $company, int $position, int $requisition, int $after): array
+    {
+        $actor->recruitment($company, $position);
+        $request = $this->requisition($actor, $company, $position, $requisition, false);
+        $applications = $this->db->rows(
+            'SELECT a.id, a.state, a.version, c.display_name, c.identity_ref
+             FROM applications a JOIN candidates c ON c.group_id=a.group_id AND c.id=a.candidate_id
+             WHERE a.group_id=? AND a.company_id=? AND a.position_id=? AND a.requisition_id=? AND a.id>?
+             ORDER BY a.id LIMIT 100',
+            [$actor->groupId, $company, $position, $requisition, $after],
+        );
+        return ['requisition' => $request, 'applications' => $applications];
+    }
+
     public function dossier(Access $actor, int $company, int $position, int $id): array
     {
         $actor->recruitment($company, $position);
@@ -221,7 +245,7 @@ final class Recruitment
                 $scope,
             ),
             'offers' => $this->db->rows(
-                'SELECT id, drafted_by, signed_by, effective_on, state, version, decision_ref FROM offers
+                'SELECT id, drafted_by, signed_by, effective_on, monthly_minor, state, version, decision_ref FROM offers
                  WHERE group_id=? AND company_id=? AND position_id=? AND application_id=? ORDER BY id',
                 $scope,
             ),
@@ -239,7 +263,7 @@ final class Recruitment
     private function requisition(Access $actor, int $company, int $position, int $id, bool $lock): array
     {
         return $this->db->row(
-            'SELECT id, proposed_start, state, version FROM requisitions WHERE group_id=? AND company_id=? AND position_id=? AND id=?'
+            'SELECT id, proposed_start, justification, state, version FROM requisitions WHERE group_id=? AND company_id=? AND position_id=? AND id=?'
                 . ($lock ? ' FOR UPDATE' : ''),
             [$actor->groupId, $company, $position, $id],
         ) ?? throw new BusinessError(404, 'requisition_not_found');

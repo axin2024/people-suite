@@ -21,6 +21,7 @@ $workspaceFiles = [
     '/workspace.js' => ['workspace.js', 'text/javascript'],
     '/workspace-ui.js' => ['workspace-ui.js', 'text/javascript'],
     '/payroll-workspace.js' => ['payroll-workspace.js', 'text/javascript'],
+    '/recruitment-workspace.js' => ['recruitment-workspace.js', 'text/javascript'],
     '/workspace.css' => ['workspace.css', 'text/css'],
 ];
 if ($method === 'GET' && isset($workspaceFiles[$path])) {

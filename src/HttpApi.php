@@ -160,6 +160,11 @@ final class HttpApi
                 $actor, $company, Input::date($_GET['on'] ?? null, 'on'),
             )]];
         }
+        if ($method === 'GET' && $resource === 'positions') {
+            return [200, ['positions' => $this->organization->positions(
+                $actor, $company, Input::date($_GET['on'] ?? null, 'on'), Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )]];
+        }
         if ($method === 'GET' && $resource === 'employments') {
             return [200, ['employments' => $this->employment->directory(
                 $actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0),
@@ -543,6 +548,20 @@ final class HttpApi
     {
         if ($method === 'GET' && $resource === 'revisions') {
             return [200, ['revisions' => $this->organization->history($actor, $company, $position)]];
+        }
+        if ($method === 'GET' && $resource === 'headcount') {
+            return [200, $this->organization->headcount($actor, $company, $position, Input::date($_GET['on'] ?? null, 'on'))];
+        }
+        if ($method === 'GET' && $resource === 'requisitions') {
+            return [200, ['requisitions' => $this->recruitment->requisitions(
+                $actor, $company, $position, Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )]];
+        }
+        if ($method === 'GET' && preg_match('#^requisitions/([0-9]{1,19})$#D', $resource, $match)) {
+            return [200, $this->recruitment->requisitionApplications(
+                $actor, $company, $position, Input::integer($match[1], 'requisition_id'),
+                Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )];
         }
         if ($method === 'GET' && preg_match('#^applications/([0-9]{1,19})$#D', $resource, $match)) {
             return [200, $this->recruitment->dossier($actor, $company, $position, Input::integer($match[1], 'application_id'))];

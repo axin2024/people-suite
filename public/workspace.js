@@ -1,5 +1,6 @@
 import { attachment, badge, button, empty, facts, field, money, node, panel, reference, statuses, table, today } from "./workspace-ui.js";
 import { payrollPages } from "./payroll-workspace.js";
+import { recruitmentPages } from "./recruitment-workspace.js";
 
 const $ = (id) => document.getElementById(id);
 const view = $("view");
@@ -32,6 +33,22 @@ const errors = {
     payroll_adjustment_decision_conflict: "此决定编号已用于不同的补差内容。",
     payroll_adjustments_require_new_trial: "已登记新的补差，请重新试算后送审。",
     payslip_inquiry_conflict: "该核对申请已改变，请刷新详情。",
+    department_not_effective: "所选部门在生效日尚未启用。",
+    position_not_found: "当前账号没有该岗位的操作权限。",
+    position_revision_conflict: "岗位版本已更新，或生效日早于当前版本。请刷新后核对。",
+    position_still_occupied: "拟撤岗日期后仍有任职或录用占用，请先处理明细。",
+    position_inactive: "该岗位在所选日期不可用，请核对岗位的生效历史。",
+    recruiter_not_found: "此账号在当前法人没有招聘专员角色。",
+    requisition_not_open: "招聘申请尚未开放。",
+    candidate_profile_mismatch: "候选人编号与姓名不一致，请核对已有身份。",
+    state_conflict: "当前状态或版本已变化，请刷新后核对。",
+    offer_state_conflict: "录用状态或版本已变化，请刷新后核对。",
+    offer_decision_conflict: "此决定编号已被使用。",
+    budget_not_found: "录用生效日没有有效编制预算。",
+    budget_period_overlap: "编制预算与已有预算期间重叠。",
+    empty_budget_period: "预算截止日须晚于开始日。",
+    headcount_exhausted: "生效区间内编制不足，请核对岗位编制。",
+    employee_already_assigned: "此员工已有相交的任职区间，请先核对任职记录。",
     invalid_csrf_token: "操作会话已过期，请刷新页面后重试。",
     login_required: "登录已失效，请重新登录。",
     inactive_session: "当前账号会话已失效，请重新登录。",
@@ -93,7 +110,7 @@ function operation(ctx, fields, buttons, submit, onSuccess, onError) {
         const signature = body.password === undefined ? JSON.stringify([action, body]) : null;
         if (signature !== lastRequest) lastKey = newRequestKey();
         lastRequest = signature;
-        const controls = Array.from(actions.querySelectorAll("button"));
+        const controls = Array.from(form.elements).filter((control) => !control.disabled);
         controls.forEach((control) => { control.disabled = true; });
         feedback.hidden = true;
         try {
@@ -160,6 +177,7 @@ async function paged(ctx, title, path, property, headers, cells, emptyText, opti
 
 const pages = [
     { id: "directory", label: "任职档案", allow: (c) => c.roles.includes("hr"), load: directory },
+    ...recruitmentPages,
     ...payrollPages,
     { id: "offboarding", label: "离职交接", allow: (c) => c.archive || c.roles.some((role) => ["hr", "manager", "employee", "payroll_reviewer"].includes(role)), load: departures },
     { id: "employee-review", label: "员工申请审核", allow: (c) => c.roles.includes("hr"), load: (ctx, id) => requests(ctx, id, true) },

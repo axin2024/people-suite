@@ -786,6 +786,8 @@ def run(origin, group):
         assert "登录人力资源工作台" in home.read().decode("utf-8")
     with urllib.request.urlopen(origin + "/workspace.js", timeout=10) as script:
         assert script.headers.get_content_type() == "text/javascript"
+    with urllib.request.urlopen(origin + "/recruitment-workspace.js", timeout=10) as script:
+        assert script.headers.get_content_type() == "text/javascript"
     assert not admin.call("/api/session")["authenticated"]
     admin.call("/api/workspace", status=401)
     credentials = {"group": group, "email": "http-admin@example.test", "password": password}
@@ -818,7 +820,14 @@ def run(origin, group):
         status=201,
     )["position_id"]
     position = f"{company}/positions/{position_id}"
+    position_directory = company + "/positions?on=2026-04-16"
+    headcount = position + "/headcount?on=2026-04-16"
+    assert admin.call(position_directory)["positions"][0]["id"] == position_id
+    assert admin.call(position_directory + f"&after={position_id}")["positions"] == []
+    assert admin.call(company + "/positions?on=2026-03-31")["positions"] == []
+    assert admin.call(headcount)["budget"] is None
     admin.call(position + "/budgets", {"starts_on": "2026-04-01", "ends_before": "2026-05-01", "capacity": 1}, key="cap")
+    assert admin.call(headcount)["available"] == 1
 
     email = "http-recruiter@example.test"
     recruiter_id = admin.call("/api/accounts", {"email": email, "display_name": "Recruiter", "password": password}, status=201)["account_id"]
@@ -827,15 +836,25 @@ def run(origin, group):
     recruiter.call("/api/session")
     recruiter.call("/api/login", {**credentials, "email": email})
     requisition = {"proposed_start": "2026-04-01", "justification": "Add a roster position"}
+    assert recruiter.call(position_directory)["positions"] == []
+    recruiter.call(position + "/requisitions", status=404)
     recruiter.call(position + "/requisitions", requisition, key="req", status=404)
     admin.call(position + "/recruiters", {"account_id": recruiter_id})
+    assert [row["id"] for row in recruiter.call(position_directory)["positions"]] == [position_id]
+    recruiter.call(headcount, status=404)
 
     req = recruiter.call(position + "/requisitions", requisition, key="req")["requisition_id"]
     req_path = f"{position}/requisitions/{req}"
+    assert recruiter.call(position + "/requisitions")["requisitions"][0]["id"] == req
+    assert recruiter.call(position + f"/requisitions?after={req}")["requisitions"] == []
+    assert recruiter.call(req_path)["requisition"]["state"] == "pending"
     admin.call(req_path + "/open", {"version": 1}, key="open")
     apply_path = req_path + "/apply"
     applicant = {"identity_ref": "HTTP-APPLICANT", "display_name": "Case Fixture"}
     submitted = recruiter.call(apply_path, applicant, key="apply")
+    applications = recruiter.call(req_path)["applications"]
+    assert [(row["id"], row["display_name"]) for row in applications] == [(submitted["application_id"], "Case Fixture")]
+    assert recruiter.call(req_path + f"?after={submitted['application_id']}")["applications"] == []
     assert recruiter.call(apply_path, applicant, key="apply") == submitted
     assert recruiter.call(apply_path, {**applicant, "display_name": "Changed"}, key="apply", status=409)["error"] == "request_key_conflict"
     app = f"{position}/applications/{submitted['application_id']}"
@@ -847,7 +866,10 @@ def run(origin, group):
     recruiter.call(offer + "/sign", {"version": 1, "decision_ref": "SIGN-1"}, key="sign", status=404)
     admin.call(offer + "/sign", {"version": 1, "decision_ref": "SIGN-1"}, key="sign")
     assert admin.call(offer + "/accept", {"version": 2, "decision_ref": "ACCEPT-1"}, key="accept")["state"] == "accepted"
-    assert [d["action"] for d in recruiter.call(app)["decisions"]] == ["sign", "accept"]
+    dossier = recruiter.call(app)
+    assert [d["action"] for d in dossier["decisions"]] == ["sign", "accept"]
+    assert dossier["offers"][0]["monthly_minor"] == 900000
+    assert admin.call(headcount)["occupied"] == 1 and admin.call(headcount)["available"] == 0
     intake = {"version": 3, "employee_code": "EMP-001", "contract_ref": "C-001", "contract_ends_before": "2026-05-01"}
     recruiter.call(offer + "/onboard", intake, key="onboard", status=404)
     employee = admin.call(offer + "/onboard", intake, key="onboard")
@@ -877,12 +899,17 @@ def run(origin, group):
     cutover = {"assignment_version": 1, "position_id": next_id, "effective_from": "2026-04-16"}
     assert admin.call(employment_path + "/transfers", cutover, key="transfer", status=409)["error"] == "budget_not_found"
     next_position = f"{company}/positions/{next_id}"
+    assert [row["id"] for row in recruiter.call(position_directory)["positions"]] == [position_id]
+    recruiter.call(next_position + "/requisitions", status=404)
+    admin.call(next_position + f"/requisitions/{req}", status=404)
     admin.call(next_position + "/budgets", {"starts_on": "2026-04-01", "ends_before": "2026-05-01", "capacity": 1}, key="cap-finance")
     transfer = admin.call(employment_path + "/transfers", cutover, key="transfer")
     assert transfer["previous"] == {"from": "2026-04-01", "until": "2026-04-16", "department_id": department_id}
     assert transfer["next"] == {"from": "2026-04-16", "until": None, "department_id": finance}
     assert admin.call(employment_path + "?on=2026-04-15")["department_id"] == department_id
     assert admin.call(employment_path + "?on=2026-04-16")["department_id"] == finance
+    assert admin.call(headcount)["occupied"] == 0
+    assert admin.call(next_position + "/headcount?on=2026-04-16")["occupied"] == 1
     overlap = admin.call(employment_path + "/transfers", cutover, key="stale-transfer", status=409)
     assert overlap["error"] == "assignment_interval_conflict" and overlap["details"]["current_version"] == 2
     renewal = {"version": 1, "contract_ref": "C-002", "effective_from": "2026-05-01", "monthly_minor": 930000}

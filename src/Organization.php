@@ -124,6 +124,49 @@ final class Organization
         );
     }
 
+    public function positions(Access $actor, int $company, string $on, int $after): array
+    {
+        $actor->company($company, 'hr', 'recruiter');
+        $scope = [$on, $on, $actor->groupId, $company, $after];
+        $grant = '';
+        if (!in_array('hr', $actor->roles($company), true)) {
+            $grant = ' AND EXISTS (SELECT 1 FROM recruiter_positions g WHERE g.group_id=p.group_id
+                                   AND g.company_id=p.company_id AND g.position_id=p.id AND g.account_id=?)';
+            $scope[] = $actor->accountId;
+        }
+        return $this->db->rows(
+            'SELECT p.id, p.code, r.id AS revision_id, r.title, r.active, d.name AS department_name
+             FROM positions p
+             JOIN position_revisions r ON r.group_id=p.group_id AND r.company_id=p.company_id AND r.position_id=p.id
+                AND r.effective_from<=? AND (r.effective_until IS NULL OR r.effective_until>?)
+             JOIN departments d ON d.group_id=r.group_id AND d.company_id=r.company_id AND d.id=r.department_id
+             WHERE p.group_id=? AND p.company_id=? AND p.id>?' . $grant . ' ORDER BY p.id LIMIT 100',
+            $scope,
+        );
+    }
+
+    public function headcount(Access $actor, int $company, int $position, string $on): array
+    {
+        $actor->company($company, 'hr');
+        $scope = [$actor->groupId, $company, $position];
+        return $this->db->transaction(function () use ($scope, $on): array {
+            if ($this->db->row('SELECT id FROM positions WHERE group_id=? AND company_id=? AND id=?', $scope) === null) {
+                throw new BusinessError(404, 'position_not_found');
+            }
+            $budget = $this->db->row(
+                'SELECT id, starts_on, ends_before, capacity FROM headcount_budgets
+                 WHERE group_id=? AND company_id=? AND position_id=? AND starts_on<=? AND ends_before>?',
+                [...$scope, $on, $on],
+            );
+            if ($budget === null) {
+                return ['on' => $on, 'budget' => null, 'occupied' => null, 'available' => null];
+            }
+            $tomorrow = (new \DateTimeImmutable($on))->modify('+1 day')->format('Y-m-d');
+            $occupied = count($this->headcountIntervals($scope, $on, $tomorrow, (int) $budget['id']));
+            return ['on' => $on, 'budget' => $budget, 'occupied' => $occupied, 'available' => (int) $budget['capacity'] - $occupied];
+        }, repeatableRead: true);
+    }
+
     public function createPosition(Access $actor, int $company, string $key, array $input): array
     {
         $actor->company($company, 'hr');
@@ -323,19 +366,8 @@ final class Organization
         int $incoming,
         int $budgetId = 0,
     ): void {
-        $overlap = $this->db->rows(
-            'SELECT starts_on, ends_before FROM headcount_slots
-             WHERE group_id=? AND company_id=? AND position_id=? AND budget_id=? AND released_at IS NULL
-               AND starts_on<? AND ends_before>?
-             UNION ALL
-             SELECT a.effective_from AS starts_on, a.effective_until AS ends_before FROM assignments a
-             JOIN headcount_slots s ON s.group_id=a.group_id AND s.company_id=a.company_id AND s.position_id=a.position_id AND s.id=a.slot_id
-             WHERE a.group_id=? AND a.company_id=? AND a.position_id=? AND s.budget_id<>?
-               AND a.effective_from<? AND (a.effective_until IS NULL OR a.effective_until>?)',
-            [...$scope, $budgetId, $until, $start, ...$scope, $budgetId, $until, $start],
-        );
         $events = [$start => 0];
-        foreach ($overlap as $slot) {
+        foreach ($this->headcountIntervals($scope, $start, $until, $budgetId) as $slot) {
             $from = max($start, $slot['starts_on']);
             $to = min($until, $slot['ends_before'] ?? $until);
             $events[$from] = ($events[$from] ?? 0) + 1;
@@ -351,6 +383,21 @@ final class Organization
                 ]);
             }
         }
+    }
+
+    private function headcountIntervals(array $scope, string $start, string $until, int $budgetId): array
+    {
+        return $this->db->rows(
+            'SELECT starts_on, ends_before FROM headcount_slots
+             WHERE group_id=? AND company_id=? AND position_id=? AND budget_id=? AND released_at IS NULL
+               AND starts_on<? AND ends_before>?
+             UNION ALL
+             SELECT a.effective_from AS starts_on, a.effective_until AS ends_before FROM assignments a
+             JOIN headcount_slots s ON s.group_id=a.group_id AND s.company_id=a.company_id AND s.position_id=a.position_id AND s.id=a.slot_id
+             WHERE a.group_id=? AND a.company_id=? AND a.position_id=? AND s.budget_id<>?
+               AND a.effective_from<? AND (a.effective_until IS NULL OR a.effective_until>?)',
+            [...$scope, $budgetId, $until, $start, ...$scope, $budgetId, $until, $start],
+        );
     }
 
     private function knownCompany(Access $actor, int $company): void

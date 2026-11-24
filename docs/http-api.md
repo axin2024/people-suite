@@ -17,6 +17,7 @@
 | POST `/api/accounts` | 集团管理员传入 `email`、`display_name`、`password`。 |
 | POST `/api/companies/{company}/roles` | 集团管理员传入 `account_id`、`role`。 |
 | GET `/api/companies/{company}/departments?on=2026-04-16` | HR 按指定日期查询部门树。 |
+| GET `/api/companies/{company}/positions?on=2026-04-16` | 按日期查询岗位及生效版本。HR 可见本法人岗位，招聘专员仅见本人获授权的岗位，支持 `after=ID`。 |
 | POST `/api/companies/{company}/departments` | 键。HR 提交 `code`、`name`、`effective_from`、可选 `parent_id`。 |
 | POST `/api/companies/{company}/positions` | 键。HR 提交 `code`、`department_id`、`title`、`effective_from`。 |
 
@@ -28,9 +29,12 @@
 | --- | --- |
 | GET `/revisions` | 查询岗位历史。 |
 | POST `/revisions` | 键。HR 提交 `revision_id`、`department_id`、`title`、`effective_from`、`active`。撤岗时返回尚未释放的占用。 |
+| GET `/headcount?on=2026-04-16` | HR 查询当天有效预算、已占用及可用数量，包含沿用上期席位的任职。 |
 | POST `/budgets` | 键。HR 提交 `starts_on`、`ends_before`、`capacity`。 |
 | POST `/recruiters` | HR 传入已有招聘角色的 `account_id`，授权当前岗位。 |
+| GET `/requisitions` | 查询本岗位招聘申请，支持 `after=ID`。 |
 | POST `/requisitions` | 键。提交 `proposed_start`、`justification`。 |
+| GET `/requisitions/{id}` | 查询申请的版本和候选人，候选人支持 `after=ID`。 |
 | POST `/requisitions/{id}/open` | 键。HR 审批，传入当前 `version`。 |
 | POST `/requisitions/{id}/apply` | 键。提交 `identity_ref`、`display_name`。可使用相同候选身份登记不同岗位申请。 |
 | POST `/applications/{id}/interview` | 键。提交 `version`、`rating`、`notes`。 |

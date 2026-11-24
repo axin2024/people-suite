@@ -24,13 +24,17 @@ final class Access
 
     public function company(int $companyId, string ...$allowed): void
     {
-        $roles = array_column($this->db->rows(
+        if (array_intersect($this->roles($companyId), $allowed) === []) {
+            throw new BusinessError(404, 'company_not_found');
+        }
+    }
+
+    public function roles(int $companyId): array
+    {
+        return array_column($this->db->rows(
             'SELECT role FROM company_roles WHERE group_id=? AND company_id=? AND account_id=?',
             [$this->groupId, $companyId, $this->accountId],
         ), 'role');
-        if (array_intersect($roles, $allowed) === []) {
-            throw new BusinessError(404, 'company_not_found');
-        }
     }
 
     public function recruitment(int $companyId, int $positionId): void

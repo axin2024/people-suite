@@ -56,3 +56,38 @@
 | POST `/legal-transfers/{id}/accept` | 键。由另一位接收法人 HR 提交 `decision_ref`、接收合同 `contract_ref`、`monthly_minor`、可选 `ends_before`。 |
 
 调岗时，上一段在切换日开始前结束，下一段从切换日开始。状态过期或日期冲突返回 `assignment_interval_conflict`，可读取当前版本和区间。跨法人接收将转出、目标编制、目标合同和两方审计记录写入同一事务。
+
+## 排班、打卡与考勤
+
+路径以 `/api/companies/{company}` 开头。HR 可写班表和导入打卡。主管仅能访问工作日授权区间内的直属记录，员工可查看本人记录。
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| POST `/employments/{id}/account` | 键。HR 传 `account_id`，将已有员工角色的账户与人员关联。 |
+| POST `/employments/{id}/manager` | 键。HR 传主管 `account_id` 和 `effective_from`，创建带生效区间的汇报关系。 |
+| GET `/employments/{id}/shifts?workday=2026-04-15` | 查指定工作日班表。 |
+| POST `/employments/{id}/shifts` | 键。传 `workday`、`starts_at`、`ends_at`。 |
+| GET `/attendance/shifts/{shift}` | 查班次、当前版本、异常类型和打卡引用。 |
+| POST `/attendance/shifts/{shift}/punches` | 键。传 `source`、`event_ref`、`direction`（`in` 或 `out`）、`punched_at`。设备与事件的相同内容重放返回原回执。 |
+| POST `/attendance/shifts/{shift}/resolution` | 键。传 `version`、`state`（`worked`、`absent`、`excused` 或 `cancelled`）、`decision_ref`、`explanation`。HR 可传 `worked_minutes` 核定异常工时。 |
+| GET `/attendance/watermark` | HR 和薪酬角色可查当前法人考勤水位。 |
+
+时间戳使用带时区的 RFC 3339 秒级字符串，例如 `2026-04-15T22:00:00+08:00`。工作日取班次开始时在法人时区的日期。班次可跨午夜，时长介于 1 分钟和 24 小时之间。回读时间戳以 Unix 秒表示。审批后补录打卡会新增异常版本，保留此前的版本和核对记录。
+
+### 批量导入
+
+- `POST /attendance/imports` 带请求键，提交 `kind`（`roster` 或 `punches`）和最多 100 个 `rows`。每行带唯一 `row_ref`，及对应班表或打卡字段。班表行带 `employment_id`，打卡行带 `shift_id`。
+- `POST /attendance/imports/{id}/run` 每次最多处理 25 行。可传 `limit`、`after_row` 和 `retry_failed`。断开后回到原批次继续，成功行保留初次回执。
+- `GET /attendance/imports/{id}` 返回待处理、成功、失败的数量，以及每行的尝试次数和结果。
+
+### 假期余额
+
+路径以 `/api/companies/{company}/employments/{id}/leave` 开头，额度使用整数分钟。
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| GET `?workday=2026-04-20` | 查该日请假。HR 和本人同时可查年度余额。 |
+| POST `/grants` | 键。HR 传 `kind`、`year`、`minutes` 和 `decision_ref`。 |
+| POST 基础路径 | 键。HR 或本人传 `kind`、`workday`、`minutes`、`reason` 和 `reference`，预占额度。 |
+| GET `/{request}` | 查申请和账本记录。 |
+| POST `/{request}/approve`、`/deny`、`/cancel` | 键。传 `version`、`decision_ref`。通过转作已用，拒批或销假返还余额。本人可撤回待批申请，已批准的申请由 HR 或主管销假。 |

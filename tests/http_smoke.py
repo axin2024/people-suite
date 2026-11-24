@@ -1,5 +1,6 @@
 """Exercise the organization and recruitment API over HTTP against an isolated database."""
 
+from concurrent.futures import ThreadPoolExecutor
 import http.cookiejar
 import json
 import os
@@ -7,6 +8,7 @@ import re
 import secrets
 import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.request
 
@@ -37,10 +39,131 @@ class Session:
             response = error
         with response:
             payload = json.load(response)
-            assert response.code == status, (path, response.code, payload)
+            expected = (status,) if isinstance(status, int) else status
+            assert response.code in expected, (path, response.code, payload)
         if "csrf_token" in payload:
             self.csrf = payload["csrf_token"]
         return payload
+
+
+def create_login(admin, origin, company, credentials, name, role):
+    email = f"{name}@example.test"
+    account = admin.call(
+        "/api/accounts", {"email": email, "display_name": name, "password": credentials["password"]}, status=201
+    )["account_id"]
+    admin.call(company + "/roles", {"account_id": account, "role": role})
+    actor = Session(origin)
+    actor.call("/api/session")
+    actor.call("/api/login", {**credentials, "email": email})
+    return account, actor
+
+
+def attendance_and_leave(admin, origin, credentials, company, employment):
+    employee_id, employee = create_login(admin, origin, company, credentials, "worker", "employee")
+    manager_id, manager = create_login(admin, origin, company, credentials, "manager", "manager")
+    _, outsider = create_login(admin, origin, company, credentials, "other-manager", "manager")
+    admin.call(employment + "/account", {"account_id": employee_id}, key="employee-link")
+    admin.call(
+        employment + "/manager", {"account_id": manager_id, "effective_from": "2026-04-01"}, key="manager-link",
+    )
+    night = {
+        "workday": "2026-04-15", "starts_at": "2026-04-15T22:00:00+08:00", "ends_at": "2026-04-16T06:00:00+08:00",
+    }
+    roster = employment + "/shifts"
+    assert admin.call(roster, {**night, "workday": "2026-04-16"}, key="wrong-workday", status=422)["error"] == "shift_must_start_on_workday"
+    shift = admin.call(roster, night, key="night", status=201)
+    assert admin.call(roster, night, key="overlap", status=409)["error"] == "shift_overlap"
+    path = f"{company}/attendance/shifts/{shift['shift_id']}"
+    manager.call(path)
+    outsider.call(path, status=404)
+    employee.call(path)
+    employee.call(path + "/resolution", {"state": "worked", "version": 1}, key="forbidden", status=404)
+    in_punch = {"source": "GATE-01", "event_ref": "SHIFT-IN", "direction": "in", "punched_at": night["starts_at"]}
+    out_punch = {"source": "GATE-01", "event_ref": "SHIFT-OUT", "direction": "out", "punched_at": night["ends_at"]}
+    first = admin.call(path + "/punches", in_punch, key="first-in")
+    assert admin.call(path + "/punches", {**in_punch, "punched_at": "2026-04-15T14:00:00Z"}, key="retry-in") == first
+    assert admin.call(path + "/punches", {**in_punch, "direction": "out"}, key="mutated-in", status=409)["error"] == "punch_event_conflict"
+    missing_out = manager.call(path)["attendance"]
+    assert missing_out["state"] == "anomaly" and missing_out["evidence"]["anomalies"] == ["missing_out"]
+    unresolved = {"state": "worked", "version": missing_out["version"], "decision_ref": "WORKED-01", "explanation": "Normal shift"}
+    assert manager.call(path + "/resolution", unresolved, key="resolve-night", status=409)["error"] == "attendance_anomaly_unresolved"
+    admin.call(path + "/punches", out_punch, key="first-out")
+    ready = manager.call(path)["attendance"]
+    assert ready["state"] == "ready" and ready["worked_minutes"] == 480
+    approved = manager.call(path + "/resolution", {**unresolved, "version": ready["version"]}, key="resolve-night")
+    assert approved["state"] == "worked" and approved["worked_minutes"] == 480
+    assert admin.call(company + "/attendance/watermark")["watermark"] == approved["watermark"]
+    assert len(manager.call(roster + "?workday=2026-04-15")["shifts"]) == 1
+    assert manager.call(roster + "?workday=2026-04-16")["shifts"] == []
+
+    imports = company + "/attendance/imports"
+    roster_import = {
+        "kind": "roster",
+        "rows": [
+            {"row_ref": "one", "employment_id": int(employment.rsplit("/", 1)[1]),
+             "workday": "2026-04-23", "starts_at": "2026-04-23T09:00:00+08:00", "ends_at": "2026-04-23T17:00:00+08:00"},
+            {"row_ref": "two", "employment_id": int(employment.rsplit("/", 1)[1]), **night},
+        ],
+    }
+    import_id = admin.call(imports, roster_import, key="roster-import", status=201)["import_id"]
+    assert admin.call(imports, roster_import, key="roster-import", status=201)["import_id"] == import_id
+    import_path = f"{imports}/{import_id}"
+    assert admin.call(import_path)["counts"] == {"pending": 2, "succeeded": 0, "failed": 0}
+    assert admin.call(import_path + "/run", {"limit": 1})["counts"] == {"pending": 1, "succeeded": 1, "failed": 0}
+    resumed = admin.call(import_path + "/run", {})
+    assert resumed["counts"] == {"pending": 0, "succeeded": 1, "failed": 1}
+    assert resumed["rows"][1]["outcome"]["error"] == "shift_overlap"
+    retried = admin.call(import_path + "/run", {"retry_failed": True})
+    assert [row["attempts"] for row in retried["rows"]] == [1, 2]
+    imported_shift = resumed["rows"][0]["outcome"]["shift_id"]
+    punches_import = {"kind": "punches", "rows": [
+        {"row_ref": "in", "shift_id": imported_shift, "source": "GATE-01", "event_ref": "DAY-IN",
+         "direction": "in", "punched_at": "2026-04-23T09:00:00+08:00"},
+        {"row_ref": "out", "shift_id": imported_shift, "source": "GATE-01", "event_ref": "DAY-OUT",
+         "direction": "out", "punched_at": "2026-04-23T17:00:00+08:00"},
+    ]}
+    punches_id = admin.call(imports, punches_import, key="punches-import", status=201)["import_id"]
+    assert admin.call(f"{imports}/{punches_id}/run", {})["counts"]["succeeded"] == 2
+    assert manager.call(f"{company}/attendance/shifts/{imported_shift}")["attendance"]["worked_minutes"] == 480
+
+    leave = employment + "/leave"
+    balance = {"kind": "annual", "year": 2026, "minutes": 480, "decision_ref": "INITIAL-ANNUAL"}
+    assert admin.call(leave + "/grants", balance, key="grant-leave")["available_minutes"] == 480
+    other_session = Session(origin)
+    other_session.call("/api/session")
+    other_session.call("/api/login", {**credentials, "email": "worker@example.test"})
+    barrier = threading.Barrier(2)
+
+    def try_leave(session, index):
+        application = {
+            "kind": "annual", "workday": f"2026-04-{20 + index}", "minutes": 480,
+            "reason": "Personal leave", "reference": f"LEAVE-{index}",
+        }
+        barrier.wait(timeout=5)
+        return session.call(leave, application, key=f"leave-{index}", status=(201, 409))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        attempts = [pool.submit(try_leave, actor, index) for index, actor in enumerate((employee, other_session))]
+        results = [future.result(timeout=15) for future in attempts]
+    pending, failure = sorted(results, key=lambda result: "error" in result)
+    assert pending["state"] == "pending" and failure["error"] == "leave_balance_insufficient"
+    request = f"{leave}/{pending['leave_id']}"
+    assert employee.call(leave + "?workday=2026-04-20")["balances"][0]["available_minutes"] == 0
+    outsider.call(request, status=404)
+    employee.call(request + "/approve", {"version": 1, "decision_ref": "NO-SELF"}, key="self-approve", status=404)
+    approved_leave = manager.call(request + "/approve", {"version": 1, "decision_ref": "APPROVED-01"}, key="approve-leave")
+    assert approved_leave["used_change"] == 480 and approved_leave["reserved_change"] == -480
+    employee.call(request + "/cancel", {"version": 2, "decision_ref": "NO-CANCEL"}, key="self-cancel", status=403)
+    cancelled = manager.call(request + "/cancel", {"version": 2, "decision_ref": "CANCEL-01"}, key="cancel-leave")
+    assert cancelled["used_change"] == -480
+    denied = employee.call(
+        leave, {"kind": "annual", "workday": "2026-04-22", "minutes": 480, "reason": "Extra request", "reference": "LEAVE-3"},
+        key="leave-3", status=201,
+    )
+    manager.call(f"{leave}/{denied['leave_id']}/deny", {"version": 1, "decision_ref": "DENY-01"}, key="deny-leave")
+    assert manager.call(leave + "?workday=2026-04-20")["balances"] == []
+    assert employee.call(leave + "?workday=2026-04-20")["balances"][0]["available_minutes"] == 480
+    assert [row["action"] for row in employee.call(request)["ledger"]] == ["reserve", "approve", "cancel"]
 
 
 def run(origin, group):
@@ -143,6 +266,7 @@ def run(origin, group):
     renewal = {"version": 1, "contract_ref": "C-002", "effective_from": "2026-05-01", "monthly_minor": 930000}
     assert admin.call(employment_path + "/contracts", renewal, key="renew")["version"] == 2
     assert [c["reference"] for c in admin.call(employment_path)["contracts"]] == ["C-001", "C-002"]
+    attendance_and_leave(admin, origin, credentials, company, employment_path)
 
     target_id = admin.call(
         "/api/companies",
@@ -199,7 +323,7 @@ def run(origin, group):
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, onboarding, contract history, department transfer and two-party legal transfer passed.")
+    print("HTTP recruitment, employment, night shift reconciliation, leave balance racing, and legal transfer passed.")
 
 
 if __name__ == "__main__":

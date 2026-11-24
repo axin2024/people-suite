@@ -14,6 +14,10 @@ final class HttpApi
     private readonly Organization $organization;
     private readonly Recruitment $recruitment;
     private readonly Employment $employment;
+    private readonly WorkforceAccess $workforce;
+    private readonly Attendance $attendance;
+    private readonly AttendanceImports $attendanceImports;
+    private readonly Leave $leave;
 
     public function __construct(private readonly Database $db)
     {
@@ -22,6 +26,10 @@ final class HttpApi
         $this->organization = new Organization($db, $operations);
         $this->recruitment = new Recruitment($db, $operations, $this->organization);
         $this->employment = new Employment($db, $operations, $this->organization);
+        $this->workforce = new WorkforceAccess($db, $operations);
+        $this->attendance = new Attendance($db, $operations, $this->workforce);
+        $this->attendanceImports = new AttendanceImports($db, $operations, $this->attendance);
+        $this->leave = new Leave($db, $operations, $this->workforce);
     }
 
     public function handle(string $method, string $path): array
@@ -155,6 +163,12 @@ final class HttpApi
                 $actor, $company, Input::integer($match[1], 'transfer_id'), $this->requestKey(), $input,
             )];
         }
+        if (str_starts_with($resource, 'attendance/')) {
+            return $this->attendanceRoute($method, $resource, $actor, $company, $input);
+        }
+        if (preg_match('#^employments/([0-9]{1,19})/(account|manager|shifts|leave(?:/.*)?)$#D', $resource, $match)) {
+            return $this->workforceRoute($method, $match[2], $actor, $company, Input::integer($match[1], 'employment_id'), $input);
+        }
         if (preg_match('#^employments/([0-9]{1,19})(?:/(contracts|transfers|legal-transfers))?$#D', $resource, $match)) {
             $id = Input::integer($match[1], 'employment_id');
             return match ($method . '/' . ($match[2] ?? '')) {
@@ -173,6 +187,75 @@ final class HttpApi
             throw new BusinessError(404, 'route_not_found');
         }
         return $this->position($method, $match[2], $actor, $company, Input::integer($match[1], 'position_id'), $input);
+    }
+
+    private function attendanceRoute(string $method, string $resource, Access $actor, int $company, array $input): array
+    {
+        if ($method === 'GET' && $resource === 'attendance/watermark') {
+            return [200, ['watermark' => $this->attendance->watermark($actor, $company)]];
+        }
+        if ($method === 'POST' && $resource === 'attendance/imports') {
+            return [201, $this->attendanceImports->submit($actor, $company, $this->requestKey(), $input)];
+        }
+        if (preg_match('#^attendance/imports/([0-9]{1,19})(/run)?$#D', $resource, $match)) {
+            $id = Input::integer($match[1], 'import_id');
+            return match ($method . ($match[2] ?? '')) {
+                'GET' => [200, $this->attendanceImports->status($actor, $company, $id)],
+                'POST/run' => [200, $this->attendanceImports->run($actor, $company, $id, $input)],
+                default => throw new BusinessError(404, 'route_not_found'),
+            };
+        }
+        if (!preg_match('#^attendance/shifts/([0-9]{1,19})(?:/(punches|resolution))?$#D', $resource, $match)) {
+            throw new BusinessError(404, 'route_not_found');
+        }
+        $shift = Input::integer($match[1], 'shift_id');
+        return match ($method . '/' . ($match[2] ?? '')) {
+            'GET/' => [200, $this->attendance->detail($actor, $company, $shift)],
+            'POST/punches' => [200, $this->attendance->punch($actor, $company, $shift, $this->requestKey(), $input)],
+            'POST/resolution' => [200, $this->attendance->reconcile($actor, $company, $shift, $this->requestKey(), $input)],
+            default => throw new BusinessError(404, 'route_not_found'),
+        };
+    }
+
+    private function workforceRoute(
+        string $method,
+        string $resource,
+        Access $actor,
+        int $company,
+        int $employment,
+        array $input,
+    ): array {
+        if ($method === 'GET' && $resource === 'shifts') {
+            return [200, ['shifts' => $this->attendance->roster(
+                $actor, $company, $employment, Input::date($_GET['workday'] ?? null, 'workday'),
+            )]];
+        }
+        if ($method === 'GET' && $resource === 'leave') {
+            return [200, $this->leave->summary($actor, $company, $employment, Input::date($_GET['workday'] ?? null, 'workday'))];
+        }
+        if (preg_match('#^leave/([0-9]{1,19})(?:/(approve|deny|cancel))?$#D', $resource, $match)) {
+            $leaveId = Input::integer($match[1], 'leave_id');
+            if ($method === 'GET' && !isset($match[2])) {
+                return [200, $this->leave->detail($actor, $company, $employment, $leaveId)];
+            }
+            if ($method === 'POST' && isset($match[2])) {
+                return [200, $this->leave->decide($actor, $company, $employment, $leaveId, $match[2], $this->requestKey(), $input)];
+            }
+        }
+        if ($method !== 'POST') {
+            throw new BusinessError(404, 'route_not_found');
+        }
+        $key = $this->requestKey();
+        return match ($resource) {
+            'account' => [200, $this->workforce->linkAccount(
+                $actor, $company, $employment, $key, Input::integer($input['account_id'] ?? null, 'account_id'),
+            )],
+            'manager' => [200, $this->workforce->assignManager($actor, $company, $employment, $key, $input)],
+            'shifts' => [201, $this->attendance->schedule($actor, $company, $employment, $key, $input)],
+            'leave' => [201, $this->leave->request($actor, $company, $employment, $key, $input)],
+            'leave/grants' => [200, $this->leave->grant($actor, $company, $employment, $key, $input)],
+            default => throw new BusinessError(404, 'route_not_found'),
+        };
     }
 
     private function position(string $method, string $resource, Access $actor, int $company, int $position, array $input): array

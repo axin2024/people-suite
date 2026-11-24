@@ -5,10 +5,13 @@ declare(strict_types=1);
 use PeopleSuite\Accounts;
 use PeopleSuite\BusinessError;
 use PeopleSuite\Database;
+use PeopleSuite\Employment;
+use PeopleSuite\Leave;
 use PeopleSuite\Operations;
 use PeopleSuite\Organization;
 use PeopleSuite\Recruitment;
 use PeopleSuite\Schema;
+use PeopleSuite\WorkforceAccess;
 
 require __DIR__ . '/../src/bootstrap.php';
 
@@ -19,12 +22,14 @@ $accounts = new Accounts($db);
 $operations = new Operations($db);
 $organization = new Organization($db, $operations);
 $recruitment = new Recruitment($db, $operations, $organization);
+$leave = new Leave($db, $operations, new WorkforceAccess($db, $operations));
 
-if (($argv[1] ?? '') === 'accept') {
-    [$group, $company, $position, $offer, $key, $barrier] = array_slice($argv, 2);
+$mode = $argv[1] ?? '';
+if (in_array($mode, ['accept', 'leave'], true)) {
+    [$group, $company, $object, $index, $key, $barrier] = array_slice($argv, 2);
     $actor = $accounts->authenticate($group, 'admin@example.test', DEMO_PASSWORD);
     $deadline = microtime(true) + 15;
-    touch($barrier . '-' . $offer);
+    touch($barrier . '-' . $index);
     while (!is_file($barrier)) {
         if (microtime(true) >= $deadline) {
             throw new RuntimeException('Start signal timed out.');
@@ -33,9 +38,15 @@ if (($argv[1] ?? '') === 'accept') {
         usleep(10000);
     }
     try {
-        $result = $recruitment->decide($actor, (int) $company, (int) $position, (int) $offer, 'accept', $key, [
-            'version' => 2, 'decision_ref' => $key,
-        ]);
+        $result = match ($mode) {
+            'accept' => $recruitment->decide($actor, (int) $company, (int) $object, (int) $index, 'accept', $key, [
+                'version' => 2, 'decision_ref' => $key,
+            ]),
+            'leave' => $leave->request($actor, (int) $company, (int) $object, $key, [
+                'kind' => 'annual', 'workday' => '2026-04-' . (20 + (int) $index), 'minutes' => 480,
+                'reason' => 'Synthetic leave', 'reference' => $key,
+            ]),
+        };
     } catch (BusinessError $error) {
         $result = ['error' => $error->reason];
     }
@@ -130,7 +141,7 @@ foreach ([$offer1, $offer2] as $offer) {
     ]);
 }
 
-$race = raceAcceptances($group, $alpha, $position, [$offer1, $offer2]);
+$race = raceRequests('accept', $group, $alpha, $position, [$offer1, $offer2]);
 $winners = array_filter($race, fn(array $item): bool => ($item['state'] ?? '') === 'accepted');
 $losers = array_filter($race, fn(array $item): bool => ($item['error'] ?? '') === 'headcount_exhausted');
 verify(count($winners) === 1 && count($losers) === 1, 'Only one concurrent acceptance wins a one-slot budget.');
@@ -165,12 +176,25 @@ $slotCounts = $db->row(
 );
 verify((int) $slotCounts['historical'] === 2 && (int) $slotCounts['held'] === 1, 'Keep the released slot and a single active allocation.');
 
+$intake = (new Employment($db, $operations, $organization))->onboard($actor, $alpha, $position, $loser, 'new-employee', [
+    'version' => 3, 'employee_code' => 'RACE-EMP', 'contract_ref' => 'RACE-CONTRACT',
+]);
+$employmentId = $intake['employment_id'];
+$leave->grant($actor, $alpha, $employmentId, 'grant-race', [
+    'kind' => 'annual', 'year' => 2026, 'minutes' => 480, 'decision_ref' => 'ANNUAL-RACE',
+]);
+$leaveRace = raceRequests('leave', $group, $alpha, $employmentId, [1, 2]);
+verify(count(array_filter($leaveRace, fn(array $item): bool => ($item['state'] ?? '') === 'pending')) === 1, 'Only one leave request can reserve the last day.');
+verify(count(array_filter($leaveRace, fn(array $item): bool => ($item['error'] ?? '') === 'leave_balance_insufficient')) === 1, 'The other transaction reports the depleted balance.');
+verify($leave->summary($actor, $alpha, $employmentId, '2026-04-21')['balances'][0]['reserved_minutes'] === 480,
+    'Two independent MySQL sessions must preserve the exact reserved balance.');
+
 $outside = $accounts->createGroup($group . '-outside', 'Isolated group', 'admin@example.test', 'Separate admin', DEMO_PASSWORD);
 $outsider = $accounts->session($outside['group_id'], $outside['account_id']);
 reject(fn() => $organization->grantRole($outsider, $alpha, $outsider->accountId, 'hr'), 'company_not_found');
 reject(fn() => $recruitment->dossier($outsider, $alpha, $position, $a1['application_id']), 'company_not_found');
 
-echo "Organization and recruitment integration passed (including two MySQL sessions competing for the same slot).\n";
+echo "Organization, recruitment and leave passed, including independent MySQL sessions competing for a slot and for the last leave day.\n";
 
 function verify(bool $condition, string $description): void
 {
@@ -190,45 +214,45 @@ function reject(callable $operation, string $reason): BusinessError
     throw new RuntimeException("Expected failure {$reason}.");
 }
 
-function raceAcceptances(string $group, int $company, int $position, array $offers): array
+function raceRequests(string $mode, string $group, int $company, int $object, array $indices): array
 {
     $barrier = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'hcm-race-' . bin2hex(random_bytes(12));
     $workers = [];
     $results = [];
     try {
-        foreach ($offers as $offer) {
+        foreach ($indices as $index) {
             $options = PHP_OS_FAMILY === 'Windows' ? ['-d', 'extension=pdo_mysql'] : [];
             $command = [
-                PHP_BINARY, ...$options, __FILE__, 'accept',
-                $group, (string) $company, (string) $position, (string) $offer, 'race-' . $offer, $barrier,
+                PHP_BINARY, ...$options, __FILE__, $mode,
+                $group, (string) $company, (string) $object, (string) $index, 'race-' . $index, $barrier,
             ];
             $process = proc_open($command, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
             if (!is_resource($process)) {
                 throw new RuntimeException('Could not start an acceptance process.');
             }
-            $workers[$offer] = [$process, $pipes];
+            $workers[$index] = [$process, $pipes];
         }
         $deadline = microtime(true) + 15;
-        foreach ($offers as $offer) {
-            $ready = $barrier . '-' . $offer;
+        foreach ($indices as $index) {
+            $ready = $barrier . '-' . $index;
             while (!is_file($ready)) {
                 if (microtime(true) >= $deadline) {
-                    throw new RuntimeException('Workers did not reach the acceptance barrier.');
+                throw new RuntimeException('Workers did not reach the start barrier.');
                 }
                 clearstatcache(true, $ready);
                 usleep(10000);
             }
         }
         touch($barrier);
-        foreach ($workers as $offer => [$process, $pipes]) {
+        foreach ($workers as $index => [$process, $pipes]) {
             $output = stream_get_contents($pipes[1]);
             $errors = stream_get_contents($pipes[2]);
             fclose($pipes[1]);
             fclose($pipes[2]);
             $code = proc_close($process);
-            unset($workers[$offer]);
-            verify($code === 0, 'Acceptance process failed: ' . $errors);
-            $results[$offer] = json_decode($output, true, flags: JSON_THROW_ON_ERROR);
+            unset($workers[$index]);
+            verify($code === 0, 'Test worker failed: ' . $errors);
+            $results[$index] = json_decode($output, true, flags: JSON_THROW_ON_ERROR);
         }
     } finally {
         foreach ($workers as [$process, $pipes]) {
@@ -240,8 +264,8 @@ function raceAcceptances(string $group, int $company, int $position, array $offe
         if (is_file($barrier)) {
             unlink($barrier);
         }
-        foreach ($offers as $offer) {
-            $ready = $barrier . '-' . $offer;
+        foreach ($indices as $index) {
+            $ready = $barrier . '-' . $index;
             if (is_file($ready)) {
                 unlink($ready);
             }

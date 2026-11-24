@@ -50,4 +50,18 @@ final class Input
         }
         return $number;
     }
+
+    public static function instant(mixed $value, string $field): int
+    {
+        $value = self::text($value, $field, 25);
+        if (str_ends_with($value, 'Z')) {
+            $value = substr($value, 0, -1) . '+00:00';
+        }
+        $pattern = '/^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00)$/D';
+        $date = preg_match($pattern, $value) ? DateTimeImmutable::createFromFormat('!Y-m-d\TH:i:sP', $value) : false;
+        if (!$date || $date->format('Y-m-d\TH:i:sP') !== $value) {
+            throw new BusinessError(422, 'invalid_instant', ['field' => $field]);
+        }
+        return $date->getTimestamp();
+    }
 }

@@ -788,6 +788,8 @@ def run(origin, group):
         assert script.headers.get_content_type() == "text/javascript"
     with urllib.request.urlopen(origin + "/recruitment-workspace.js", timeout=10) as script:
         assert script.headers.get_content_type() == "text/javascript"
+    with urllib.request.urlopen(origin + "/employment-workspace.js", timeout=10) as script:
+        assert script.headers.get_content_type() == "text/javascript"
     assert not admin.call("/api/session")["authenticated"]
     admin.call("/api/workspace", status=401)
     credentials = {"group": group, "email": "http-admin@example.test", "password": password}
@@ -906,15 +908,22 @@ def run(origin, group):
     transfer = admin.call(employment_path + "/transfers", cutover, key="transfer")
     assert transfer["previous"] == {"from": "2026-04-01", "until": "2026-04-16", "department_id": department_id}
     assert transfer["next"] == {"from": "2026-04-16", "until": None, "department_id": finance}
-    assert admin.call(employment_path + "?on=2026-04-15")["department_id"] == department_id
-    assert admin.call(employment_path + "?on=2026-04-16")["department_id"] == finance
+    previous_day = admin.call(employment_path + "?on=2026-04-15")
+    next_day = admin.call(employment_path + "?on=2026-04-16")
+    assert (previous_day["department_id"], previous_day["position_title"], previous_day["effective_until"]) == (department_id, "Coordinator", "2026-04-16")
+    assert (next_day["department_id"], next_day["department_name"], next_day["position_code"]) == (finance, "Finance", "P2")
     assert admin.call(headcount)["occupied"] == 0
     assert admin.call(next_position + "/headcount?on=2026-04-16")["occupied"] == 1
     overlap = admin.call(employment_path + "/transfers", cutover, key="stale-transfer", status=409)
-    assert overlap["error"] == "assignment_interval_conflict" and overlap["details"]["current_version"] == 2
+    assert overlap["error"] == "assignment_interval_conflict"
+    assert overlap["details"] == {"current_version": 2, "from": "2026-04-16", "until": None}
     renewal = {"version": 1, "contract_ref": "C-002", "effective_from": "2026-05-01", "monthly_minor": 930000}
+    invalid = admin.call(employment_path + "/contracts", {**renewal, "effective_from": "2026-05-02"}, key="renew-gap", status=409)
+    assert invalid["error"] == "contract_renewal_not_contiguous" and invalid["details"]["available_from"] == "2026-05-01"
     assert admin.call(employment_path + "/contracts", renewal, key="renew")["version"] == 2
-    assert [c["reference"] for c in admin.call(employment_path)["contracts"]] == ["C-001", "C-002"]
+    assert [(c["reference"], c["monthly_minor"]) for c in admin.call(employment_path)["contracts"]] == [
+        ("C-001", 900000), ("C-002", 930000),
+    ]
     actors = attendance_and_leave(admin, origin, credentials, company, employment_path)
     original_payroll = payroll_trial(admin, origin, credentials, company, employment_path, department_id, finance, actors)
     performance_cycle(admin, origin, company, credentials, employment_path, original_payroll, actors)
@@ -945,16 +954,27 @@ def run(origin, group):
         {"code": "S", "title": "Service coordinator", "department_id": target_dept, "effective_from": "2026-04-01"},
         key="receiving-position", status=201,
     )["position_id"]
-    legal = admin.call(
-        employment_path + "/legal-transfers",
-        {
-            "target_company_id": target_id, "target_position_id": target_position,
-            "assignment_version": 2, "effective_from": "2026-04-25",
-        },
-        key="legal-transfer",
-    )
+    outbound = employment_path + "/legal-transfers"
+    routing = {
+        "target_company_id": target_id, "target_position_id": target_position,
+        "assignment_version": 2, "effective_from": "2026-04-25",
+    }
+    legal = admin.call(outbound, routing, key="legal-transfer")
+    competing = admin.call(outbound, {**routing, "effective_from": "2026-04-26"}, key="later-transfer")
+    outgoing = admin.call(outbound)["outgoing"]
+    assert [(row["id"], row["target_company_name"], row["state"]) for row in outgoing] == [
+        (legal["transfer_id"], "South Lab", "pending"), (competing["transfer_id"], "South Lab", "pending"),
+    ]
+    assert [row["id"] for row in admin.call(outbound + f"?after={legal['transfer_id']}")["outgoing"]] == [competing["transfer_id"]]
+    receiving.call(outbound, status=404)
     assert receiving.call(target + "/legal-transfers")["incoming"][0]["id"] == legal["transfer_id"]
-    acceptance = f"{target}/legal-transfers/{legal['transfer_id']}/accept"
+    receiving.call(target + "/legal-transfers?state=other", status=422)
+    transfer_detail = f"{target}/legal-transfers/{legal['transfer_id']}"
+    pending = receiving.call(transfer_detail)
+    assert (pending["source_company_name"], pending["target_position_code"], pending["requested_by"]) == ("Harbor Lab", "S", admin_id)
+    recruiter.call(transfer_detail, status=404)
+    admin.call(f"{company}/legal-transfers/{legal['transfer_id']}", status=404)
+    acceptance = transfer_detail + "/accept"
     decision = {"decision_ref": "RECEIPT-01", "contract_ref": "C-SOUTH-01", "monthly_minor": 930000}
     assert admin.call(acceptance, decision, key="self-accept", status=409)["error"] == "legal_transfer_requires_receiver"
     assert receiving.call(acceptance, decision, key="receive", status=409)["error"] == "budget_not_found"
@@ -966,6 +986,16 @@ def run(origin, group):
     received = receiving.call(acceptance, decision, key="receive")
     assert receiving.call(acceptance, decision, key="receive") == received
     assert receiving.call(target + "/legal-transfers")["incoming"] == []
+    accepted = receiving.call(transfer_detail)
+    assert (accepted["state"], accepted["target_employment_id"], accepted["decision_ref"]) == (
+        "accepted", received["employment_id"], "RECEIPT-01",
+    )
+    assert receiving.call(target + "/legal-transfers?state=accepted")["incoming"] == [accepted]
+    assert receiving.call(f"{target}/legal-transfers/{competing['transfer_id']}")["stale"] == 1
+    outgoing = admin.call(outbound)["outgoing"]
+    assert [(row["state"], row["stale"], row["decision_ref"]) for row in outgoing] == [
+        ("accepted", 0, "RECEIPT-01"), ("pending", 1, None),
+    ]
     received_path = f"{target}/employments/{received['employment_id']}"
     assert receiving.call(received_path)["employee"]["id"] == employee["employee_id"]
     assert receiving.call(received_path + "?on=2026-04-25")["department_id"] == target_dept

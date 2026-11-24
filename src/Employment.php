@@ -240,18 +240,56 @@ final class Employment
         });
     }
 
-    public function incomingTransfers(Access $actor, int $company, int $after): array
+    public function incomingTransfers(Access $actor, int $company, int $after, string $state = 'pending'): array
     {
         $actor->company($company, 'hr');
+        if (!in_array($state, ['pending', 'accepted'], true)) {
+            throw new BusinessError(422, 'invalid_transfer_state');
+        }
         return $this->db->rows(
-            "SELECT t.id, t.effective_on, t.source_company_id, t.target_position_id, e.employee_code, e.display_name
-             FROM legal_transfers t JOIN employments w
-               ON w.group_id=t.group_id AND w.company_id=t.source_company_id AND w.id=t.source_employment_id
-             JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
-             WHERE t.group_id=? AND t.target_company_id=? AND t.state='pending' AND t.id>?
-               AND w.assignment_version=t.source_version AND w.ends_before IS NULL
-             ORDER BY t.id LIMIT 100",
-            [$actor->groupId, $company, $after],
+            self::INCOMING_TRANSFER
+            . " WHERE t.group_id=? AND t.target_company_id=? AND t.state=? AND t.id>?
+                AND (t.state='accepted' OR (w.assignment_version=t.source_version AND w.ends_before IS NULL))
+                ORDER BY t.id LIMIT 100",
+            [$actor->groupId, $company, $state, $after],
+        );
+    }
+
+    public function incomingTransfer(Access $actor, int $company, int $id): array
+    {
+        $actor->company($company, 'hr');
+        return $this->db->row(
+            self::INCOMING_TRANSFER . ' WHERE t.group_id=? AND t.target_company_id=? AND t.id=?',
+            [$actor->groupId, $company, $id],
+        ) ?? throw new BusinessError(404, 'legal_transfer_not_found');
+    }
+
+    private const INCOMING_TRANSFER = <<<'SQL'
+        SELECT t.id, t.effective_on, t.source_company_id, t.target_position_id, t.target_employment_id,
+               t.requested_by, t.state, t.decision_ref, e.employee_code, e.display_name,
+               c.name AS source_company_name, p.code AS target_position_code,
+               (w.assignment_version<>t.source_version OR w.ends_before IS NOT NULL) AND t.state='pending' AS stale
+        FROM legal_transfers t JOIN employments w
+          ON w.group_id=t.group_id AND w.company_id=t.source_company_id AND w.id=t.source_employment_id
+        JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
+        JOIN companies c ON c.group_id=t.group_id AND c.id=t.source_company_id
+        JOIN positions p ON p.group_id=t.group_id AND p.company_id=t.target_company_id AND p.id=t.target_position_id
+        SQL;
+
+    public function outgoingTransfers(Access $actor, int $company, int $employment, int $after): array
+    {
+        $actor->company($company, 'hr');
+        $this->employment($actor, $company, $employment, false);
+        return $this->db->rows(
+            "SELECT t.id, t.effective_on, t.target_company_id, c.name AS target_company_name, p.code AS target_position_code,
+                    t.state, t.decision_ref,
+                    (w.assignment_version<>t.source_version OR w.ends_before IS NOT NULL) AND t.state='pending' AS stale
+             FROM legal_transfers t
+             JOIN employments w ON w.group_id=t.group_id AND w.company_id=t.source_company_id AND w.id=t.source_employment_id
+             JOIN companies c ON c.group_id=t.group_id AND c.id=t.target_company_id
+             JOIN positions p ON p.group_id=t.group_id AND p.company_id=t.target_company_id AND p.id=t.target_position_id
+             WHERE t.group_id=? AND t.source_company_id=? AND t.source_employment_id=? AND t.id>? ORDER BY t.id LIMIT 100",
+            [$actor->groupId, $company, $employment, $after],
         );
     }
 
@@ -269,24 +307,22 @@ final class Employment
     public function history(Access $actor, int $company, int $id): array
     {
         $actor->company($company, 'hr');
-        $record = $this->employment($actor, $company, $id, false);
-        $scope = [$actor->groupId, $company, $id];
-        return [
-            'employment' => $record,
-            'employee' => $this->db->row('SELECT id, employee_code, display_name FROM employees WHERE group_id=? AND id=?', [
-                $actor->groupId, $record['employee_id'],
-            ]),
-            'assignments' => $this->db->rows(
-                'SELECT id, version, position_id, position_revision_id, department_id, effective_from, effective_until
-                 FROM assignments WHERE group_id=? AND company_id=? AND employment_id=? ORDER BY version',
-                $scope,
-            ),
-            'contracts' => $this->db->rows(
-                'SELECT id, version, reference, effective_from, ends_before FROM contract_revisions
-                 WHERE group_id=? AND company_id=? AND employment_id=? ORDER BY version',
-                $scope,
-            ),
-        ];
+        return $this->db->transaction(function () use ($actor, $company, $id): array {
+            $record = $this->employment($actor, $company, $id, false);
+            $scope = [$actor->groupId, $company, $id];
+            return [
+                'employment' => $record,
+                'employee' => $this->db->row('SELECT id, employee_code, display_name FROM employees WHERE group_id=? AND id=?', [
+                    $actor->groupId, $record['employee_id'],
+                ]),
+                'assignments' => $this->db->rows(self::ASSIGNMENT_DETAILS . ' ORDER BY a.version', $scope),
+                'contracts' => $this->db->rows(
+                    'SELECT id, version, reference, effective_from, ends_before, monthly_minor FROM contract_revisions
+                     WHERE group_id=? AND company_id=? AND employment_id=? ORDER BY version',
+                    $scope,
+                ),
+            ];
+        }, repeatableRead: true);
     }
 
     public function assignmentOn(Access $actor, int $company, int $id, string $on): array
@@ -294,12 +330,21 @@ final class Employment
         $actor->company($company, 'hr');
         $this->employment($actor, $company, $id, false);
         return $this->db->row(
-            'SELECT id, version, position_id, position_revision_id, department_id, effective_from, effective_until
-             FROM assignments WHERE group_id=? AND company_id=? AND employment_id=?
-               AND effective_from<=? AND (effective_until IS NULL OR effective_until>?)',
+            self::ASSIGNMENT_DETAILS . ' AND a.effective_from<=? AND (a.effective_until IS NULL OR a.effective_until>?)',
             [$actor->groupId, $company, $id, $on, $on],
         ) ?? throw new BusinessError(404, 'assignment_not_effective');
     }
+
+    private const ASSIGNMENT_DETAILS = <<<'SQL'
+        SELECT a.id, a.version, a.position_id, a.position_revision_id, a.department_id, a.effective_from, a.effective_until,
+               p.code AS position_code, r.title AS position_title, d.name AS department_name
+        FROM assignments a
+        JOIN positions p ON p.group_id=a.group_id AND p.company_id=a.company_id AND p.id=a.position_id
+        JOIN position_revisions r ON r.group_id=a.group_id AND r.company_id=a.company_id AND r.position_id=a.position_id
+          AND r.id=a.position_revision_id
+        JOIN departments d ON d.group_id=a.group_id AND d.company_id=a.company_id AND d.id=a.department_id
+        WHERE a.group_id=? AND a.company_id=? AND a.employment_id=?
+        SQL;
 
     private function employeeForCandidate(Access $actor, int $candidateId, string $code): int
     {

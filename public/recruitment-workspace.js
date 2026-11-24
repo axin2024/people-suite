@@ -136,7 +136,7 @@ async function positionDetails(ctx, route) {
     ], [["grant", "授权此岗位"]], (_, body) => ctx.request(`${path}/recruiters`, body),
     () => ctx.go(route, "招聘专员已获本岗位权限。"));
     return [
-        panel(atDate?.title ?? latest.title, moveDate(ctx, route, on)),
+        panel(atDate?.title ?? latest.title, facts([["岗位编号", position], ["法人编号", ctx.company.id]]), moveDate(ctx, route, on)),
         panel("编制占用", headcount.budget ? facts([
             ["预算期间", `${headcount.budget.starts_on} 至 ${headcount.budget.ends_before}（不含）`],
             ["总编制", headcount.budget.capacity], ["已占用", headcount.occupied], ["可用", headcount.available],

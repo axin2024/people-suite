@@ -1,4 +1,5 @@
 import { attachment, badge, button, empty, facts, field, money, node, panel, reference, statuses, table, today } from "./workspace-ui.js";
+import { employmentPages } from "./employment-workspace.js";
 import { payrollPages } from "./payroll-workspace.js";
 import { recruitmentPages } from "./recruitment-workspace.js";
 
@@ -44,11 +45,18 @@ const errors = {
     state_conflict: "当前状态或版本已变化，请刷新后核对。",
     offer_state_conflict: "录用状态或版本已变化，请刷新后核对。",
     offer_decision_conflict: "此决定编号已被使用。",
-    budget_not_found: "录用生效日没有有效编制预算。",
+    budget_not_found: "所选生效日没有有效编制预算。",
     budget_period_overlap: "编制预算与已有预算期间重叠。",
     empty_budget_period: "预算截止日须晚于开始日。",
     headcount_exhausted: "生效区间内编制不足，请核对岗位编制。",
     employee_already_assigned: "此员工已有相交的任职区间，请先核对任职记录。",
+    assignment_interval_conflict: "调动日期与当前任职区间冲突，或档案版本已变化。请核对下方区间。",
+    contract_revision_conflict: "合同版本已变化，或生效日与现有记录冲突。请刷新并核对合同版本。",
+    contract_renewal_not_contiguous: "续签须从上一份合同的截止日开始。",
+    same_position: "请选择与当前岗位不同的目标岗位。",
+    same_company: "请选择其他法人作为接收方。",
+    legal_transfer_requires_receiver: "该申请需要由接收法人的另一位 HR 处理，或已接收。",
+    duplicate_business_key: "此业务编号已被使用，请核对记录。",
     invalid_csrf_token: "操作会话已过期，请刷新页面后重试。",
     login_required: "登录已失效，请重新登录。",
     inactive_session: "当前账号会话已失效，请重新登录。",
@@ -176,7 +184,7 @@ async function paged(ctx, title, path, property, headers, cells, emptyText, opti
 }
 
 const pages = [
-    { id: "directory", label: "任职档案", allow: (c) => c.roles.includes("hr"), load: directory },
+    ...employmentPages,
     ...recruitmentPages,
     ...payrollPages,
     { id: "offboarding", label: "离职交接", allow: (c) => c.archive || c.roles.some((role) => ["hr", "manager", "employee", "payroll_reviewer"].includes(role)), load: departures },
@@ -308,7 +316,7 @@ async function administration(ctx) {
         notice(`账号已创建，编号为 ${result.account_id}。`);
     });
     const results = [
-        panel("集团法人", table(["代码", "法人", "时区", "币种"], companies.map((row) => [row.code, row.name, row.timezone, row.currency]))),
+        panel("集团法人", table(["编号", "代码", "法人", "时区", "币种"], companies.map((row) => [row.id, row.code, row.name, row.timezone, row.currency]))),
         panel("新增法人", addCompany), panel("新增账号", addAccount),
     ];
     if (companies.length) {
@@ -321,46 +329,6 @@ async function administration(ctx) {
         results.push(panel("法人角色授权", grant));
     }
     return results;
-}
-
-async function directory(ctx, employmentId) {
-    const path = ctx.base + "/employments";
-    if (!employmentId) {
-        return [await paged(ctx, "法人任职记录", path, "employments",
-            ["工号", "员工", "起始日期", "任职截至", "任职版本", "操作"],
-            (row) => [row.employee_code, row.display_name, row.starts_on, row.ends_before, row.assignment_version,
-                button("查看任职", () => ctx.go(row.id))])];
-    }
-    const data = await api(`${path}/${employmentId}`);
-    if (!ctx.current()) return [];
-    toolbar.prepend(button("返回任职列表", () => ctx.go()));
-    const { employment, employee, assignments, contracts } = data;
-    const result = [
-        panel(employee.display_name, facts([["工号", employee.employee_code], ["起始日期", employment.starts_on],
-            ["任职截至", employment.ends_before], ["任职版本", employment.assignment_version]])),
-        panel("岗位生效历史", table(["版本", "岗位编号", "部门编号", "起始日期", "有效至"],
-            assignments.map((row) => [row.version, row.position_id, row.department_id, row.effective_from, row.effective_until]))),
-        panel("合同版本", table(["版本", "合同编号", "生效日期", "有效至"],
-            contracts.map((row) => [row.version, row.reference, row.effective_from, row.ends_before]))),
-    ];
-    if (!employment.ends_before) {
-        const form = operation(ctx, [
-            reference("离职单号", "reference"), field("离职生效日", "ends_before", { type: "date", value: today(ctx.company) }),
-            field("离职事由", "reason", { multiline: true, maxLength: 600, wide: true }),
-            field("应归还设备", "assets", { multiline: true, required: false, wide: true, hint: "每行填写设备编号、空格、设备名称" }),
-        ], [["start", "发起离职"]], (_, body, key) => {
-            const equipment = body.assets.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-                const [code, ...label] = line.split(/\s+/);
-                return { code, label: label.join(" ") };
-            });
-            return api(ctx.base + "/offboarding", {
-                employment_id: employmentId, assignment_version: employment.assignment_version, ends_before: body.ends_before,
-                reference: body.reference, reason: body.reason, equipment,
-            }, key);
-        }, (response) => open("offboarding", response.case_id, "离职单已发起。"));
-        result.push(panel("发起离职交接", form));
-    }
-    return result;
 }
 
 function blockerTable(items) {

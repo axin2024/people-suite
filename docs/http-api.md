@@ -54,14 +54,16 @@
 | 方法与后缀 | 请求字段与说明 |
 | --- | --- |
 | GET `/employments` | HR 查看当前法人的任职目录，支持 `after=ID`。 |
-| GET `/employments/{id}` | 查询人事档案、任职时间线和合同版本。可加 `?on=2026-04-16` 获取该日任职段。 |
+| GET `/employments/{id}` | 查询人事档案、带岗位和部门名称的任职时间线及合同版本。可加 `?on=2026-04-16` 获取该日任职段。 |
 | POST `/employments/{id}/contracts` | 键。提交当前合同 `version`、`contract_ref`、`effective_from`、`monthly_minor`、可选 `ends_before`。续签新增版本。 |
 | POST `/employments/{id}/transfers` | 键。提交 `assignment_version`、目标 `position_id`、`effective_from`。返回任职分段及需复核的假勤和成本期间。 |
 | POST `/employments/{id}/legal-transfers` | 键。来源法人 HR 提交 `assignment_version`、`target_company_id`、`target_position_id`、`effective_from`。 |
-| GET `/legal-transfers` | 接收法人 HR 查看待接收调动，可通过 `?after=ID` 分页。 |
+| GET `/employments/{id}/legal-transfers` | 来源法人 HR 查看转出单、接收决定和源版本失效标记，支持 `after=ID`。 |
+| GET `/legal-transfers` | 接收法人 HR 查看待接收调动。传 `state=accepted` 查看已接收调动，支持 `after=ID`。 |
+| GET `/legal-transfers/{id}` | 接收法人 HR 查看调动单、源版本失效标记及接收任职编号。 |
 | POST `/legal-transfers/{id}/accept` | 键。由另一位接收法人 HR 提交 `decision_ref`、接收合同 `contract_ref`、`monthly_minor`、可选 `ends_before`。 |
 
-调岗时，上一段在切换日开始前结束，下一段从切换日开始。状态过期或日期冲突返回 `assignment_interval_conflict`，可读取当前版本和区间。跨法人接收将转出、目标编制、目标合同和两方审计记录写入同一事务。
+调岗时，上一段在切换日开始前结束，下一段从切换日开始。状态过期或日期冲突返回 `assignment_interval_conflict`，可读取当前版本和区间。跨法人接收将转出、目标编制、目标合同和两方审计记录写入同一事务。主岗后续有调动或终止时，旧申请在历史中以 `stale=1` 标明，并退出待接收队列。
 
 ## 排班、打卡与考勤
 

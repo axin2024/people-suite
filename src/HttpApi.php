@@ -185,7 +185,11 @@ final class HttpApi
         }
         if ($method === 'GET' && $resource === 'legal-transfers') {
             $after = Input::integer($_GET['after'] ?? 0, 'after', 0);
-            return [200, ['incoming' => $this->employment->incomingTransfers($actor, $company, $after)]];
+            $state = Input::text($_GET['state'] ?? 'pending', 'state', 16);
+            return [200, ['incoming' => $this->employment->incomingTransfers($actor, $company, $after, $state)]];
+        }
+        if ($method === 'GET' && preg_match('#^legal-transfers/([0-9]{1,19})$#D', $resource, $match)) {
+            return [200, $this->employment->incomingTransfer($actor, $company, Input::integer($match[1], 'transfer_id'))];
         }
         if ($method === 'POST' && preg_match('#^legal-transfers/([0-9]{1,19})/accept$#D', $resource, $match)) {
             return [200, $this->employment->acceptLegalTransfer(
@@ -218,6 +222,9 @@ final class HttpApi
                     : $this->employment->history($actor, $company, $id)],
                 'POST/contracts' => [200, $this->employment->renew($actor, $company, $id, $this->requestKey(), $input)],
                 'POST/transfers' => [200, $this->employment->transfer($actor, $company, $id, $this->requestKey(), $input)],
+                'GET/legal-transfers' => [200, ['outgoing' => $this->employment->outgoingTransfers(
+                    $actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0),
+                )]],
                 'POST/legal-transfers' => [200, $this->employment->requestLegalTransfer(
                     $actor, $company, $id, $this->requestKey(), $input,
                 )],

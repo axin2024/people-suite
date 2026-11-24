@@ -735,6 +735,34 @@ def departure(admin, origin, credentials, company, worker, employment, source_co
     assert worker.download(final_path + ".csv", f"payslip-{final_slip}.csv")[0]["payable_minor"] == "450000"
     outsider.call(final_path + ".csv", status=404)
     assert len(worker.call(source_company + "/payroll/my-payslips")["payslips"]) == 2
+    return int(company.rsplit("/", 1)[1]), final_slip, worker.account_id
+
+
+def verify_export_audit(group_id, archived_download):
+    query = r"""
+        require 'src/bootstrap.php';
+        $db = PeopleSuite\Database::connect();
+        echo json_encode($db->rows(
+            'SELECT company_id, actor_id, object_id, action, facts FROM audit_events WHERE group_id=? AND action LIKE ? ORDER BY id',
+            [(int) $argv[1], 'payroll.%_exported']
+        ), JSON_THROW_ON_ERROR);
+    """
+    exports = json.loads(subprocess.check_output([*php, "-r", query, str(group_id)]))
+    for event in exports:
+        event["facts"] = json.loads(event["facts"])
+    routes = {(event["action"], event["facts"]["view"]) for event in exports}
+    assert routes == {
+        ("payroll.payslip_exported", "employee"),
+        ("payroll.payslip_exported", "payroll"),
+        ("payroll.costs_exported", "group"),
+        ("payroll.costs_exported", "run"),
+        ("payroll.inquiries_exported", "employee"),
+        ("payroll.inquiries_exported", "review_queue"),
+    }
+    company, slip, actor = archived_download
+    final_events = [event for event in exports if event["action"] == "payroll.payslip_exported" and event["object_id"] == slip]
+    assert final_events == [{"company_id": company, "actor_id": actor, "object_id": slip,
+                             "action": "payroll.payslip_exported", "facts": {"view": "employee"}}]
 
 
 def run(origin, group):
@@ -744,7 +772,8 @@ def run(origin, group):
     assert not admin.call("/api/session")["authenticated"]
     credentials = {"group": group, "email": "http-admin@example.test", "password": password}
     assert admin.call("/api/login", credentials, status=403, invalid_csrf=True)["error"] == "invalid_csrf_token"
-    admin_id = admin.call("/api/login", credentials)["account_id"]
+    login = admin.call("/api/login", credentials)
+    admin_id = login["account_id"]
 
     company_id = admin.call(
         "/api/companies",
@@ -904,7 +933,8 @@ def run(origin, group):
     group_costs = "/api/payroll/department-costs?period_start=2026-04-01"
     assert receiving.call(group_costs)["companies"] == []
     receiving.call(original_payroll[4] + "/department-costs", status=404)
-    departure(admin, origin, credentials, target, employee_session, received["employment_id"], company)
+    archived_download = departure(admin, origin, credentials, target, employee_session, received["employment_id"], company)
+    verify_export_audit(login["group_id"], archived_download)
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)

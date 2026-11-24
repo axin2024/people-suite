@@ -10,6 +10,7 @@ final class HttpApi
 {
     private const SESSION_LIFETIME = 28800;
 
+    private readonly Operations $operations;
     private readonly Accounts $accounts;
     private readonly Organization $organization;
     private readonly Recruitment $recruitment;
@@ -30,7 +31,7 @@ final class HttpApi
     public function __construct(private readonly Database $db)
     {
         $this->accounts = new Accounts($db);
-        $operations = new Operations($db);
+        $this->operations = $operations = new Operations($db);
         $this->organization = new Organization($db, $operations);
         $this->recruitment = new Recruitment($db, $operations, $this->organization);
         $this->employment = new Employment($db, $operations, $this->organization);
@@ -123,7 +124,7 @@ final class HttpApi
     {
         if ($method === 'GET' && in_array($path, ['/api/payroll/department-costs', '/api/payroll/department-costs.csv'], true)) {
             $report = $this->payrollCosts->forPeriod($actor, $_GET['period_start'] ?? null);
-            return [200, str_ends_with($path, '.csv') ? PayrollExports::costs($report['companies'], $report['totals_by_currency']) : $report];
+            return str_ends_with($path, '.csv') ? $this->groupCostDownload($actor, $report) : [200, $report];
         }
         if ($method === 'GET' && $path === '/api/companies') {
             return [200, ['companies' => $this->db->rows(
@@ -233,21 +234,32 @@ final class HttpApi
             return [201, $this->payroll->createRun($actor, $company, $this->requestKey(), $input)];
         }
         if ($method === 'GET' && preg_match('#^payroll/payslips/([0-9]{1,19})(\.csv)?$#D', $resource, $match)) {
-            $payslip = $this->payroll->payslip($actor, $company, Input::integer($match[1], 'payslip_id'));
-            return [200, isset($match[2]) ? PayrollExports::payslip($payslip) : $payslip];
+            $id = Input::integer($match[1], 'payslip_id');
+            $payslip = $this->payroll->payslip($actor, $company, $id);
+            return isset($match[2]) ? $this->payrollDownload(
+                $actor, $company, 'payslip', $id, 'payroll.payslip_exported', PayrollExports::payslip($payslip),
+                ['view' => 'payroll'],
+            ) : [200, $payslip];
         }
         if ($method === 'GET' && $resource === 'payroll/my-payslips') {
             return [200, ['payslips' => $this->payroll->myPayslips($actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0))]];
         }
         if ($method === 'GET' && preg_match('#^payroll/my-payslips/([0-9]{1,19})(\.csv)?$#D', $resource, $match)) {
-            $payslip = $this->payroll->myPayslip($actor, $company, Input::integer($match[1], 'payslip_id'));
-            return [200, isset($match[2]) ? PayrollExports::payslip($payslip) : $payslip];
+            $id = Input::integer($match[1], 'payslip_id');
+            $payslip = $this->payroll->myPayslip($actor, $company, $id);
+            return isset($match[2]) ? $this->payrollDownload(
+                $actor, $company, 'payslip', $id, 'payroll.payslip_exported', PayrollExports::payslip($payslip),
+                ['view' => 'employee'],
+            ) : [200, $payslip];
         }
         if (preg_match('#^payroll/my-payslips/([0-9]{1,19})/inquiries(\.csv)?$#D', $resource, $match)) {
             $payslip = Input::integer($match[1], 'payslip_id');
             if ($method === 'GET') {
                 $inquiries = $this->payrollInquiries->forEmployee($actor, $company, $payslip, Input::integer($_GET['after'] ?? 0, 'after', 0));
-                return [200, isset($match[2]) ? PayrollExports::inquiries($inquiries, employeeView: true) : ['inquiries' => $inquiries]];
+                return isset($match[2]) ? $this->payrollDownload(
+                    $actor, $company, 'payslip', $payslip, 'payroll.inquiries_exported',
+                    PayrollExports::inquiries($inquiries, employeeView: true), ['view' => 'employee', 'row_count' => count($inquiries)],
+                ) : [200, ['inquiries' => $inquiries]];
             }
             if ($method === 'POST' && !isset($match[2])) {
                 return [201, $this->payrollInquiries->open($actor, $company, $payslip, $this->requestKey(), $input)];
@@ -258,7 +270,10 @@ final class HttpApi
             $inquiries = $this->payrollInquiries->reviewQueue(
                 $actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0), $_GET['state'] ?? null,
             );
-            return [200, str_ends_with($resource, '.csv') ? PayrollExports::inquiries($inquiries) : ['inquiries' => $inquiries]];
+            return str_ends_with($resource, '.csv') ? $this->payrollDownload(
+                $actor, $company, 'company', $company, 'payroll.inquiries_exported', PayrollExports::inquiries($inquiries),
+                ['view' => 'review_queue', 'row_count' => count($inquiries)],
+            ) : [200, ['inquiries' => $inquiries]];
         }
         if ($method === 'POST' && preg_match('#^payroll/inquiries/([0-9]{1,19})/(answer|acknowledge)$#D', $resource, $match)) {
             $inquiry = Input::integer($match[1], 'inquiry_id');
@@ -279,10 +294,38 @@ final class HttpApi
             )],
             'GET/verify-closure' => [200, $this->payroll->verifyClosure($actor, $company, $id)],
             'GET/department-costs' => [200, $this->payrollCosts->forRun($actor, $company, $id)],
-            'GET/department-costs.csv' => [200, PayrollExports::costs([$this->payrollCosts->forRun($actor, $company, $id)])],
+            'GET/department-costs.csv' => $this->payrollDownload(
+                $actor, $company, 'payroll_run', $id, 'payroll.costs_exported',
+                PayrollExports::costs([$this->payrollCosts->forRun($actor, $company, $id)]), ['view' => 'run'],
+            ),
             'GET/' => [200, $this->payroll->detail($actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0))],
             default => throw new BusinessError(404, 'route_not_found'),
         };
+    }
+
+    private function payrollDownload(
+        Access $actor,
+        int $company,
+        string $type,
+        int $id,
+        string $action,
+        CsvDownload $download,
+        array $facts,
+    ): array {
+        $this->operations->audit($actor, $company, $type, $id, $action, $facts);
+        return [200, $download];
+    }
+
+    private function groupCostDownload(Access $actor, array $report): array
+    {
+        $download = PayrollExports::costs($report['companies'], $report['totals_by_currency']);
+        $this->db->transaction(function () use ($actor, $report): void {
+            foreach ($report['companies'] as $company) {
+                $this->operations->audit($actor, $company['company_id'], 'payroll_run', $company['run_id'],
+                    'payroll.costs_exported', ['view' => 'group', 'period_start' => $report['period_start']]);
+            }
+        });
+        return [200, $download];
     }
 
     private function performanceRoute(string $method, string $resource, Access $actor, int $company, array $input): array

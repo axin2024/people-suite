@@ -92,6 +92,15 @@ final class PayrollInquiries
         );
     }
 
+    public function reviewDetail(Access $actor, int $company, int $id): array
+    {
+        $actor->company($company, 'payroll_reviewer');
+        return $this->db->row(
+            'SELECT ' . self::COLUMNS . ' FROM payslip_inquiries WHERE group_id=? AND company_id=? AND id=?',
+            [$actor->groupId, $company, $id],
+        ) ?? throw new BusinessError(404, 'payslip_inquiry_not_found');
+    }
+
     public function answer(Access $actor, int $company, int $id, string $key, array $input): array
     {
         $actor->company($company, 'payroll_reviewer');

@@ -190,9 +190,14 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     rule_input = {"rule_ref": "BASE-30", "title": "30 day demo", "proration_basis": "fixed_30"}
     reviewer.call(payroll + "/rules", rule_input, key="blocked-rule", status=404)
     rule = maker.call(payroll + "/rules", rule_input, key="demo-rule", status=201)["rule_id"]
+    assert reviewer.call(payroll + "/rules")["rules"][0]["id"] == rule
+    assert reviewer.call(payroll + f"/rules?after={rule}")["rules"] == []
+    manager.call(payroll + "/rules", status=404)
     period = {"period_start": "2026-04-01"}
     run = maker.call(payroll + "/runs", period, key="april-run", status=201)
     run_path = f"{payroll}/runs/{run['run_id']}"
+    assert reviewer.call(payroll + "/runs")["runs"][0]["state"] == "draft"
+    manager.call(payroll + "/runs", status=404)
     manager.call(run_path, status=404)
 
     cut = maker.call(company + "/attendance/watermark")["watermark"]
@@ -347,6 +352,9 @@ def retro_trial(company, original, department_id):
     reviewer.call(adjustment_path, adjustment, key="reviewer-retro", status=404)
     maker.call(adjustment_path, {**adjustment, "original_line_no": 3}, key="wrong-line", status=404)
     change = maker.call(adjustment_path, adjustment, key="may-retro", status=201)
+    saved, = reviewer.call(adjustment_path)["adjustments"]
+    assert saved["id"] == change["id"] and saved["gross_delta_minor"] == 30000 and saved["notes"] == adjustment["notes"]
+    assert reviewer.call(adjustment_path + f"?after={change['id']}")["adjustments"] == []
     assert change == maker.call(adjustment_path, adjustment, key="may-retro", status=201)
     assert change == maker.call(adjustment_path, adjustment, key="may-retro-retry", status=201)
     assert change["original_minor"] == 450000 and change["recalculated_minor"] == 480000
@@ -422,6 +430,9 @@ def payslip_inquiries(company, original, manager, receiving, target):
     employee.call(inquiry_path + "/acknowledge", {"version": 1}, key="early-ack", status=409)
     pending, = reviewer.call(payroll + "/inquiries?state=open")["inquiries"]
     assert pending["id"] == inquiry["inquiry_id"] and pending["question"] == question["question"]
+    assert reviewer.call(inquiry_path) == pending
+    manager.call(inquiry_path, status=404)
+    receiving.call(target + f"/payroll/inquiries/{inquiry['inquiry_id']}", status=404)
     response = {"version": 1, "decision_ref": "APRIL-RECONCILED", "answer": "The appointment changed on April 16. Each department covers 15 days."}
     foreign_path = target + f"/payroll/inquiries/{inquiry['inquiry_id']}/answer"
     assert receiving.call(foreign_path, response, key="foreign-inquiry", status=404)["error"] == "payslip_inquiry_not_found"

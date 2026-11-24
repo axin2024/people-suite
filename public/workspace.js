@@ -1,13 +1,11 @@
+import { attachment, badge, button, empty, facts, field, money, node, panel, reference, statuses, table, today } from "./workspace-ui.js";
+import { payrollPages } from "./payroll-workspace.js";
+
 const $ = (id) => document.getElementById(id);
 const view = $("view");
 const toolbar = $("section-tools");
 const state = { csrf: "", principal: null, company: null, page: "", revision: 0 };
 
-const statuses = {
-    in_progress: "办理中", completed: "已办结", cancelled: "已取消", pending: "待审核",
-    approved: "已通过", rejected: "未通过", withdrawn: "已撤回",
-    open: "待答复", answered: "已答复", acknowledged: "已确认",
-};
 const requestKinds = { employment_certificate: "任职证明", name_correction: "姓名更正", other: "其他人事服务" };
 const roles = { hr: "人事", recruiter: "招聘专员", manager: "直属主管", payroll_maker: "薪资制单", payroll_reviewer: "薪资复核", employee: "员工" };
 const taskNames = { HANDOVER: "业务交接", ACCESS: "权限与资源清点", EQUIPMENT: "设备归还确认", PAYROLL: "薪资结算确认" };
@@ -21,32 +19,25 @@ const errors = {
     employee_profile_not_found: "当前法人暂无与本账号关联的员工档案。",
     employee_request_requires_active_employment: "此任职当前无法提交新的服务申请。",
     employee_request_conflict: "申请状态已更新，请刷新详情后重试。",
+    payroll_run_conflict: "账期版本已变化，请刷新并核对后重试。",
+    payroll_trial_blocked: "账期存在阻断人员，或没有可送审的工资单。",
+    payroll_trial_maker_required: "请由完成本次试算的制单人送审。",
+    payroll_reviewer_must_differ: "本次试算需要由另一位薪资复核人处理。",
+    payroll_period_incompatible_with_rule: "此规则只适用于有 30 个自然日的账期。",
+    attendance_watermark_not_reached: "考勤水位尚未达到该编号，请刷新账期。",
+    payroll_closure_mismatch: "封账摘要与当前数据不符，无法发布。",
+    original_payroll_line_not_found: "未找到已封账的原工资分段，请核对工资单及行号。",
+    payroll_adjustment_baseline_changed: "已有更新的补差记录，请填写最新一笔的补差编号。",
+    payroll_adjustment_requires_later_period: "补差必须登记到原工资单之后的账期。",
+    payroll_adjustment_decision_conflict: "此决定编号已用于不同的补差内容。",
+    payroll_adjustments_require_new_trial: "已登记新的补差，请重新试算后送审。",
+    payslip_inquiry_conflict: "该核对申请已改变，请刷新详情。",
     invalid_csrf_token: "操作会话已过期，请刷新页面后重试。",
     login_required: "登录已失效，请重新登录。",
     inactive_session: "当前账号会话已失效，请重新登录。",
     company_not_found: "当前账号没有该法人的操作权限。",
     request_failed: "服务暂时无法处理请求，请稍后重试。",
 };
-
-function node(tag, text, className) {
-    const item = document.createElement(tag);
-    if (text != null) item.textContent = text;
-    if (className) item.className = className;
-    return item;
-}
-
-function button(text, action, className = "subtle") {
-    const element = node("button", text, className);
-    element.type = "button";
-    element.addEventListener("click", action);
-    return element;
-}
-
-function attachment(text, path) {
-    const link = node("a", text, "button subtle");
-    link.href = path;
-    return link;
-}
 
 function notice(text, isError = false) {
     $("notice").classList.toggle("error", isError);
@@ -78,77 +69,6 @@ async function api(path, body, key) {
     if (!response.ok) throw new ApiError(response, data);
     if (data.csrf_token) state.csrf = data.csrf_token;
     return data;
-}
-
-function panel(title, ...items) {
-    const section = node("section", null, "panel");
-    if (title) section.append(node("h2", title));
-    section.append(...items);
-    return section;
-}
-
-function empty(text) {
-    return node("p", text, "empty");
-}
-
-function badge(value) {
-    return node("span", statuses[value] ?? value, "badge");
-}
-
-function facts(values) {
-    const list = node("dl");
-    for (const [label, value] of values) {
-        const pair = node("div");
-        pair.append(node("dt", label), node("dd", value ?? "—"));
-        list.append(pair);
-    }
-    return list;
-}
-
-function table(columns, rows, emptyText = "暂无记录") {
-    if (!rows.length) return empty(emptyText);
-    const scroll = node("div", null, "table");
-    const grid = node("table");
-    const heading = grid.createTHead().insertRow();
-    for (const name of columns) {
-        const field = node("th", name);
-        field.scope = "col";
-        heading.append(field);
-    }
-    const body = grid.createTBody();
-    for (const row of rows) {
-        const item = body.insertRow();
-        for (const value of row) {
-            const field = item.insertCell();
-            if (value instanceof Node) field.append(value);
-            else field.textContent = value ?? "—";
-        }
-    }
-    scroll.append(grid);
-    return scroll;
-}
-
-function field(label, name, options = {}) {
-    const wrapper = node("label", label, options.wide ? "wide" : "");
-    const input = node(options.choices ? "select" : options.multiline ? "textarea" : "input");
-    if (options.choices) {
-        for (const [value, title] of options.choices) input.append(new Option(title, value));
-    } else if (!options.multiline) {
-        input.type = options.type ?? "text";
-    }
-    input.name = name;
-    input.required = options.required ?? true;
-    if (options.value != null) input.value = options.value;
-    if (options.maxLength) input.maxLength = options.maxLength;
-    if (options.pattern) input.pattern = options.pattern;
-    if (options.hint) input.placeholder = options.hint;
-    if (options.min != null) input.min = options.min;
-    wrapper.append(input);
-    return wrapper;
-}
-
-function reference(label, name = "decision_ref") {
-    return field(label, name, { maxLength: 48, pattern: "[A-Za-z0-9][A-Za-z0-9._\\-]{0,47}", hint: "例如 HR-2026-001" });
 }
 
 function operation(ctx, fields, buttons, submit, onSuccess, onError) {
@@ -203,22 +123,7 @@ function sessionExpired(error) {
     return true;
 }
 
-function today(company) {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: company.timezone, year: "numeric", month: "2-digit", day: "2-digit",
-    }).formatToParts();
-    const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
-    return `${values.year}-${values.month}-${values.day}`;
-}
-
-function money(company, minor) {
-    if (minor == null) return "—";
-    const format = new Intl.NumberFormat("zh-CN", { style: "currency", currency: company.currency });
-    const scale = 10 ** format.resolvedOptions().maximumFractionDigits;
-    return format.format(minor / scale);
-}
-
-async function paged(ctx, title, path, property, headers, cells, emptyText) {
+async function paged(ctx, title, path, property, headers, cells, emptyText, options = {}) {
     const results = [];
     const container = panel(title);
     const records = node("div");
@@ -237,23 +142,25 @@ async function paged(ctx, title, path, property, headers, cells, emptyText) {
     const footer = node("div", null, "actions pagination");
     footer.append(more);
     container.append(footer);
-    async function load() {
+    async function load(initial) {
         const params = new URLSearchParams();
         if (results.length) params.set("after", results.at(-1).id);
         const separator = path.includes("?") ? "&" : "?";
-        const response = await api(params.size ? `${path}${separator}${params}` : path);
+        const response = initial ?? await api(params.size ? `${path}${separator}${params}` : path);
         if (!ctx.current()) return;
+        if (options.accept && !options.accept(response)) throw new Error("数据版本已变化，请刷新页面后再加载。");
         results.push(...response[property]);
         records.replaceChildren(table(headers, results.map(cells), emptyText));
         more.hidden = response[property].length < 100;
         footer.hidden = more.hidden;
     }
-    await load();
+    await load(options.first);
     return container;
 }
 
 const pages = [
     { id: "directory", label: "任职档案", allow: (c) => c.roles.includes("hr"), load: directory },
+    ...payrollPages,
     { id: "offboarding", label: "离职交接", allow: (c) => c.archive || c.roles.some((role) => ["hr", "manager", "employee", "payroll_reviewer"].includes(role)), load: departures },
     { id: "employee-review", label: "员工申请审核", allow: (c) => c.roles.includes("hr"), load: (ctx, id) => requests(ctx, id, true) },
     { id: "profile", label: "我的档案", allow: (c) => c.archive || c.roles.includes("employee"), load: profile },
@@ -329,10 +236,17 @@ async function open(id, record, message) {
     if (!page) return;
     const revision = ++state.revision;
     const ctx = {
+        accountId: state.principal.account_id,
         company,
         base: company ? `/api/companies/${company.id}` : null,
+        request: api,
+        notice,
         current: () => state.revision === revision,
         go: (recordId, feedback) => open(id, recordId, feedback),
+        navigate: open,
+        tools: (...controls) => toolbar.prepend(...controls),
+        form: (...args) => operation(ctx, ...args),
+        list: (...args) => paged(ctx, ...args),
     };
     state.page = id;
     for (const link of $("sections").children) {

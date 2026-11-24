@@ -114,6 +114,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .task-form p { margin: 0; }
 .pagination { padding-top: 1rem; }
 .date-picker { align-items: end; }
+.panel-actions { margin-top: 1rem; }
 
 @media (max-width: 760px) {
     .workspace { grid-template-columns: 1fr; }

@@ -18,6 +18,29 @@ final class Payroll
     ) {
     }
 
+    public function rules(Access $actor, int $company, int $after): array
+    {
+        $actor->company($company, 'payroll_maker', 'payroll_reviewer');
+        return $this->db->rows(
+            'SELECT id, revision, rule_ref, title, proration_basis, monthly_allowance_minor, absence_hourly_minor,
+                    withholding_bps, withholding_exempt_minor, created_at
+             FROM pay_rules WHERE group_id=? AND company_id=? AND id>? ORDER BY id LIMIT 100',
+            [$actor->groupId, $company, $after],
+        );
+    }
+
+    public function runs(Access $actor, int $company, int $after): array
+    {
+        $actor->company($company, 'payroll_maker', 'payroll_reviewer');
+        return $this->db->rows(
+            'SELECT r.id, r.period_start, r.period_end, r.version, r.state, r.trial_revision, t.eligible_count, t.blocked_count
+             FROM payroll_runs r LEFT JOIN payroll_trials t
+               ON t.group_id=r.group_id AND t.company_id=r.company_id AND t.run_id=r.id AND t.revision=r.trial_revision
+             WHERE r.group_id=? AND r.company_id=? AND r.id>? ORDER BY r.id LIMIT 100',
+            [$actor->groupId, $company, $after],
+        );
+    }
+
     public function createRule(Access $actor, int $company, string $key, array $input): array
     {
         $actor->company($company, 'payroll_maker');

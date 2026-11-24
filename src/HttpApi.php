@@ -265,6 +265,12 @@ final class HttpApi
 
     private function payrollRoute(string $method, string $resource, Access $actor, int $company, array $input): array
     {
+        if ($method === 'GET' && $resource === 'payroll/rules') {
+            return [200, ['rules' => $this->payroll->rules($actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0))]];
+        }
+        if ($method === 'GET' && $resource === 'payroll/runs') {
+            return [200, ['runs' => $this->payroll->runs($actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0))]];
+        }
         if ($method === 'POST' && $resource === 'payroll/rules') {
             return [201, $this->payroll->createRule($actor, $company, $this->requestKey(), $input)];
         }
@@ -313,6 +319,9 @@ final class HttpApi
                 ['view' => 'review_queue', 'row_count' => count($inquiries)],
             ) : [200, ['inquiries' => $inquiries]];
         }
+        if ($method === 'GET' && preg_match('#^payroll/inquiries/([0-9]{1,19})$#D', $resource, $match)) {
+            return [200, $this->payrollInquiries->reviewDetail($actor, $company, Input::integer($match[1], 'inquiry_id'))];
+        }
         if ($method === 'POST' && preg_match('#^payroll/inquiries/([0-9]{1,19})/(answer|acknowledge)$#D', $resource, $match)) {
             $inquiry = Input::integer($match[1], 'inquiry_id');
             $key = $this->requestKey();
@@ -326,6 +335,9 @@ final class HttpApi
         $id = Input::integer($match[1], 'payroll_run_id');
         return match ($method . '/' . ($match[2] ?? '')) {
             'POST/trial' => [200, $this->payroll->trial($actor, $company, $id, $this->requestKey(), $input)],
+            'GET/adjustments' => [200, ['adjustments' => $this->payrollAdjustments->forRun(
+                $actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )]],
             'POST/adjustments' => [201, $this->payrollAdjustments->record($actor, $company, $id, $this->requestKey(), $input)],
             'POST/submit', 'POST/return', 'POST/close', 'POST/publish' => [200, $this->payroll->review(
                 $actor, $company, $id, $match[2], $this->requestKey(), $input,

@@ -10,6 +10,22 @@ final class PayrollAdjustments
     {
     }
 
+    public function forRun(Access $actor, int $company, int $run, int $after): array
+    {
+        $actor->company($company, 'payroll_maker', 'payroll_reviewer');
+        $scope = [$actor->groupId, $company, $run];
+        if ($this->db->row('SELECT id FROM payroll_runs WHERE group_id=? AND company_id=? AND id=?', $scope) === null) {
+            throw new BusinessError(404, 'payroll_run_not_found');
+        }
+        return $this->db->rows(
+            "SELECT id, original_payslip_id, original_line_no, department_id, decision_ref, original_minor, prior_minor,
+                    recalculated_minor, gross_delta_minor, withholding_delta_minor, recorded_at,
+                    JSON_UNQUOTE(JSON_EXTRACT(facts,'$.notes')) AS notes
+             FROM payroll_adjustments WHERE group_id=? AND company_id=? AND target_run_id=? AND id>? ORDER BY id LIMIT 100",
+            [...$scope, $after],
+        );
+    }
+
     public function record(Access $actor, int $company, int $run, string $key, array $input): array
     {
         $actor->company($company, 'payroll_maker');

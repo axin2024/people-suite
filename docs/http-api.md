@@ -101,7 +101,9 @@
 
 | 方法与后缀 | 请求字段与说明 |
 | --- | --- |
+| GET `/rules` | 查本法人计薪规则版本，支持 `after=ID`。 |
 | POST `/rules` | 键。传 `rule_ref`、`title`、`proration_basis`。可配置 `monthly_allowance_minor`、`absence_hourly_minor`、`withholding_bps`、`withholding_exempt_minor`，默认均为 0。 |
+| GET `/runs` | 查本法人账期与最近试算的应计和阻断人数，支持 `after=ID`。 |
 | POST `/runs` | 键。传月份首日 `period_start`，创建一个法人的完整自然月账期。 |
 | POST `/runs/{id}/trial` | 键。提交当前账期 `version`、`rule_id`、`attendance_watermark`。每次试算留下独立快照。 |
 | GET `/runs/{id}` | 账期与最新试算结果。工资单可传 `?after=ID` 分页。 |
@@ -129,6 +131,8 @@
 
 补差沿用原行的分摊天数、部门和扣缴规则。下一次试算纳入差额，原法人已经没有当期任职的员工会收到单独的补差单。工资单的 `net_minor` 保留当期正常净额，`payable_minor` 包含补差，`adjustments` 记录来源和金额。
 
+`GET /runs/{id}/adjustments` 返回账期已登记的补差，支持 `after=ID`。可在试算前核对原行、重算金额和决定编号。
+
 ### 员工工资核对
 
 | 方法与后缀 | 请求字段与说明 |
@@ -136,6 +140,7 @@
 | POST `/my-payslips/{id}/inquiries` | 员工对本人已发布工资单发起核对。传 `reference`、`category`、`question` 和幂等键。 |
 | GET `/my-payslips/{id}/inquiries` | 员工读取本人提出的疑问、答复和确认时间。支持 `?after=ID`。 |
 | GET `/inquiries` | 薪酬复核人读取本法人待办及历史结果。支持 `?state=open`、`answered`、`acknowledged` 和 `after=ID`。 |
+| GET `/inquiries/{id}` | 薪酬复核人查看本法人单条核对记录及最新版本。 |
 | POST `/inquiries/{id}/answer` | 由独立薪酬复核人答复，传 `version`、`decision_ref`、`answer` 和幂等键。 |
 | POST `/inquiries/{id}/acknowledge` | 本人确认收到答复，传 `version` 和幂等键。 |
 

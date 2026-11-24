@@ -19,6 +19,8 @@ header('Referrer-Policy: no-referrer');
 $workspaceFiles = [
     '/' => ['workspace.html', 'text/html'],
     '/workspace.js' => ['workspace.js', 'text/javascript'],
+    '/workspace-ui.js' => ['workspace-ui.js', 'text/javascript'],
+    '/payroll-workspace.js' => ['payroll-workspace.js', 'text/javascript'],
     '/workspace.css' => ['workspace.css', 'text/css'],
 ];
 if ($method === 'GET' && isset($workspaceFiles[$path])) {

@@ -1,0 +1,17 @@
+{
+    "name": "people-suite/people-suite",
+    "description": "Self-hosted workforce, recruitment and payroll operations for multi-company groups",
+    "type": "project",
+    "license": "Apache-2.0",
+    "require": {
+        "php": ">=8.2",
+        "ext-mbstring": "*",
+        "ext-pdo": "*",
+        "ext-pdo_mysql": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "PeopleSuite\\": "src/"
+        }
+    }
+}

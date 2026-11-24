@@ -1,0 +1,4 @@
+People Suite
+
+The project ships PHP source, database migrations, and synthetic test fixtures.
+PHP and MySQL are installed separately. No third-party frontend assets or personal datasets are bundled.

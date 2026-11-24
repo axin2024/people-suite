@@ -37,6 +37,22 @@
 | POST `/offers/{id}/sign` | 键。HR 传入 `version`、`decision_ref`。 |
 | POST `/offers/{id}/accept` | 键。HR 传入 `version`、`decision_ref`，接受录用时原子占用编制。 |
 | POST `/offers/{id}/revoke` | 键。HR 传入 `version`、`decision_ref`，释放先前占用。 |
+| POST `/offers/{id}/onboard` | 键。HR 提交已接受的录用 `version`、`employee_code`、`contract_ref`、可选 `contract_ends_before`。返回同一员工的任职、岗位和合同版本。 |
 | GET `/applications/{id}` | 查询当前岗位的申请、评估、录用及决定记录。 |
 
 各操作成功回执携带对象 ID 或版本。具体接口流程可直接运行 `tests/http_smoke.py`。
+
+## 任职与调动
+
+下面路径以 `/api/companies/{company}` 开头。HR 只能查看已获授权法人的历史和处理事项。
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| GET `/employments/{id}` | 查询人事档案、任职时间线和合同版本。可加 `?on=2026-04-16` 获取该日任职段。 |
+| POST `/employments/{id}/contracts` | 键。提交当前合同 `version`、`contract_ref`、`effective_from`、`monthly_minor`、可选 `ends_before`。续签新增版本。 |
+| POST `/employments/{id}/transfers` | 键。提交 `assignment_version`、目标 `position_id`、`effective_from`。返回任职分段及需复核的假勤和成本期间。 |
+| POST `/employments/{id}/legal-transfers` | 键。来源法人 HR 提交 `assignment_version`、`target_company_id`、`target_position_id`、`effective_from`。 |
+| GET `/legal-transfers` | 接收法人 HR 查看待接收调动，可通过 `?after=ID` 分页。 |
+| POST `/legal-transfers/{id}/accept` | 键。由另一位接收法人 HR 提交 `decision_ref`、接收合同 `contract_ref`、`monthly_minor`、可选 `ends_before`。 |
+
+调岗时，上一段在切换日开始前结束，下一段从切换日开始。状态过期或日期冲突返回 `assignment_interval_conflict`，可读取当前版本和区间。跨法人接收将转出、目标编制、目标合同和两方审计记录写入同一事务。

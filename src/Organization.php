@@ -155,8 +155,16 @@ final class Organization
                      ORDER BY starts_on, id',
                     [$actor->groupId, $company, $position, $from],
                 );
-                if ($holds !== []) {
-                    throw new BusinessError(409, 'position_still_occupied', ['occupancies' => $holds]);
+                $assignments = $this->db->rows(
+                    'SELECT id, employment_id, effective_from, effective_until FROM assignments
+                     WHERE group_id=? AND company_id=? AND position_id=? AND (effective_until IS NULL OR effective_until>?)
+                     ORDER BY effective_from, id',
+                    [$actor->groupId, $company, $position, $from],
+                );
+                if ($holds !== [] || $assignments !== []) {
+                    throw new BusinessError(409, 'position_still_occupied', [
+                        'occupancies' => $holds, 'assignments' => $assignments,
+                    ]);
                 }
             }
             $this->departmentOn($actor, $company, $revision['department_id'], $from);
@@ -201,6 +209,8 @@ final class Organization
             if ($overlap !== null) {
                 throw new BusinessError(409, 'budget_period_overlap', $overlap);
             }
+            $scope = [$actor->groupId, $company, $position];
+            $this->checkCapacity($scope, $start, $end, $capacity, 0);
             $id = $this->db->insert(
                 'INSERT INTO headcount_budgets (group_id, company_id, position_id, starts_on, ends_before, capacity)
                  VALUES (?, ?, ?, ?, ?, ?)',
@@ -265,16 +275,59 @@ final class Organization
         if ($retired !== null) {
             throw new BusinessError(409, 'position_inactive', ['effective_on' => $retired['effective_from']]);
         }
+        $scope = [$actor->groupId, $company, $position];
+        $this->checkCapacity($scope, $start, $until, (int) $budget['capacity'], 1, (int) $budget['id']);
+        return $this->db->insert(
+            'INSERT INTO headcount_slots (group_id, company_id, position_id, budget_id, offer_id, starts_on, ends_before)
+             VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [...$scope, $budget['id'], $offer, $start, $until],
+        );
+    }
+
+    public function checkFutureAssignment(Access $actor, int $company, int $position, int $slot): void
+    {
+        $scope = [$actor->groupId, $company, $position];
+        $period = $this->db->row(
+            'SELECT b.ends_before FROM headcount_slots s JOIN headcount_budgets b
+               ON b.group_id=s.group_id AND b.company_id=s.company_id AND b.position_id=s.position_id AND b.id=s.budget_id
+             WHERE s.group_id=? AND s.company_id=? AND s.position_id=? AND s.id=?',
+            [...$scope, $slot],
+        );
+        $budgets = $this->db->rows(
+            'SELECT id, starts_on, ends_before, capacity FROM headcount_budgets
+             WHERE group_id=? AND company_id=? AND position_id=? AND starts_on>=? ORDER BY starts_on',
+            [...$scope, $period['ends_before']],
+        );
+        foreach ($budgets as $budget) {
+            $this->checkCapacity(
+                $scope, $budget['starts_on'], $budget['ends_before'], (int) $budget['capacity'], 1, (int) $budget['id'],
+            );
+        }
+    }
+
+    private function checkCapacity(
+        array $scope,
+        string $start,
+        string $until,
+        int $capacity,
+        int $incoming,
+        int $budgetId = 0,
+    ): void {
         $overlap = $this->db->rows(
             'SELECT starts_on, ends_before FROM headcount_slots
              WHERE group_id=? AND company_id=? AND position_id=? AND budget_id=? AND released_at IS NULL
-               AND starts_on<? AND ends_before>?',
-            [$actor->groupId, $company, $position, $budget['id'], $until, $start],
+               AND starts_on<? AND ends_before>?
+             UNION ALL
+             SELECT a.effective_from AS starts_on, a.effective_until AS ends_before FROM assignments a
+             JOIN headcount_slots s ON s.group_id=a.group_id AND s.company_id=a.company_id AND s.position_id=a.position_id AND s.id=a.slot_id
+             WHERE a.group_id=? AND a.company_id=? AND a.position_id=? AND s.budget_id<>?
+               AND a.effective_from<? AND (a.effective_until IS NULL OR a.effective_until>?)',
+            [...$scope, $budgetId, $until, $start, ...$scope, $budgetId, $until, $start],
         );
         $events = [$start => 0];
         foreach ($overlap as $slot) {
             $from = max($start, $slot['starts_on']);
-            $to = min($until, $slot['ends_before']);
+            $to = min($until, $slot['ends_before'] ?? $until);
             $events[$from] = ($events[$from] ?? 0) + 1;
             $events[$to] = ($events[$to] ?? 0) - 1;
         }
@@ -282,17 +335,12 @@ final class Organization
         $occupied = 0;
         foreach ($events as $on => $change) {
             $occupied += $change;
-            if ($on < $until && $occupied >= (int) $budget['capacity']) {
+            if ($on < $until && $occupied + $incoming > $capacity) {
                 throw new BusinessError(409, 'headcount_exhausted', [
-                    'budget_id' => (int) $budget['id'], 'effective_on' => $on,
+                    'budget_id' => $budgetId ?: null, 'effective_on' => $on,
                 ]);
             }
         }
-        return $this->db->insert(
-            'INSERT INTO headcount_slots (group_id, company_id, position_id, budget_id, offer_id, starts_on, ends_before)
-             VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [$actor->groupId, $company, $position, $budget['id'], $offer, $start, $until],
-        );
     }
 
     private function knownCompany(Access $actor, int $company): void

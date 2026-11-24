@@ -13,6 +13,7 @@ final class HttpApi
     private readonly Accounts $accounts;
     private readonly Organization $organization;
     private readonly Recruitment $recruitment;
+    private readonly Employment $employment;
 
     public function __construct(private readonly Database $db)
     {
@@ -20,6 +21,7 @@ final class HttpApi
         $operations = new Operations($db);
         $this->organization = new Organization($db, $operations);
         $this->recruitment = new Recruitment($db, $operations, $this->organization);
+        $this->employment = new Employment($db, $operations, $this->organization);
     }
 
     public function handle(string $method, string $path): array
@@ -144,6 +146,29 @@ final class HttpApi
                 : $this->organization->createPosition($actor, $company, $key, $input);
             return [201, $result];
         }
+        if ($method === 'GET' && $resource === 'legal-transfers') {
+            $after = Input::integer($_GET['after'] ?? 0, 'after', 0);
+            return [200, ['incoming' => $this->employment->incomingTransfers($actor, $company, $after)]];
+        }
+        if ($method === 'POST' && preg_match('#^legal-transfers/([0-9]{1,19})/accept$#D', $resource, $match)) {
+            return [200, $this->employment->acceptLegalTransfer(
+                $actor, $company, Input::integer($match[1], 'transfer_id'), $this->requestKey(), $input,
+            )];
+        }
+        if (preg_match('#^employments/([0-9]{1,19})(?:/(contracts|transfers|legal-transfers))?$#D', $resource, $match)) {
+            $id = Input::integer($match[1], 'employment_id');
+            return match ($method . '/' . ($match[2] ?? '')) {
+                'GET/' => [200, array_key_exists('on', $_GET)
+                    ? $this->employment->assignmentOn($actor, $company, $id, Input::date($_GET['on'], 'on'))
+                    : $this->employment->history($actor, $company, $id)],
+                'POST/contracts' => [200, $this->employment->renew($actor, $company, $id, $this->requestKey(), $input)],
+                'POST/transfers' => [200, $this->employment->transfer($actor, $company, $id, $this->requestKey(), $input)],
+                'POST/legal-transfers' => [200, $this->employment->requestLegalTransfer(
+                    $actor, $company, $id, $this->requestKey(), $input,
+                )],
+                default => throw new BusinessError(404, 'route_not_found'),
+            };
+        }
         if (!preg_match('#^positions/([0-9]{1,19})/(.+)$#D', $resource, $match)) {
             throw new BusinessError(404, 'route_not_found');
         }
@@ -193,6 +218,7 @@ final class HttpApi
             'offers/sign', 'offers/accept', 'offers/revoke' => $this->recruitment->decide(
                 $actor, $company, $position, $id, $match[3], $key, $input,
             ),
+            'offers/onboard' => $this->employment->onboard($actor, $company, $position, $id, $key, $input),
             default => throw new BusinessError(404, 'route_not_found'),
         };
     }

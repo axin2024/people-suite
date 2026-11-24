@@ -544,6 +544,57 @@ def performance_cycle(admin, origin, company, credentials, employment_path, payr
     return person, later_path, successor
 
 
+def employee_services(admin, company, employment, payroll_actors, manager, source_department):
+    _, _, employee, other_employee, _, original_payslip, _ = payroll_actors
+    base = company + "/employee"
+    profile_path = base + "/me?on=2026-04-05"
+    initial = employee.call(profile_path)
+    assert initial["employments"][0]["employment_id"] == employment
+    assert initial["employments"][0]["department_id"] == source_department
+    old_name = initial["employee"]["display_name"]
+    manager.call(profile_path, status=404)
+    other_employee.call(profile_path, status=404)
+    initial_slip = employee.call(f"{company}/payroll/my-payslips/{original_payslip}")
+    routes = base + "/requests"
+    change = {"employment_id": employment, "kind": "name_correction", "reference": "CHECK-NAME", "details": "Update preferred workforce display name",
+              "requested_name": "Avery Chen"}
+    other_employee.call(routes, change, key="wrong-identity", status=404)
+    submitted = employee.call(routes, change, key="name-check", status=201)
+    assert employee.call(routes, change, key="name-check", status=201) == submitted
+    assert employee.call(routes, change, key="name-check-replay", status=201) == submitted
+    conflict = employee.call(routes, {**change, "requested_name": "Different display name"}, key="name-check-conflict", status=409)
+    assert conflict["error"] == "employee_request_reference_conflict"
+    assert [item["id"] for item in admin.call(base + "/review-queue?state=pending")["requests"]] == [submitted["request_id"]]
+    employee.call(base + "/review-queue", status=404)
+    path = f"{routes}/{submitted['request_id']}"
+    assert employee.call(path)["outcome"] is None and employee.call(profile_path) == initial
+    other_employee.call(path, status=404)
+    manager.call(path, status=404)
+    decision = {"version": 1, "decision_ref": "CONFIRM-NAME", "response": "Name change reviewed and recorded."}
+    employee.call(path + "/approve", decision, key="self-approval", status=404)
+    approval = admin.call(path + "/approve", decision, key="approve-name")
+    assert admin.call(path + "/approve", decision, key="approve-name") == approval
+    assert admin.call(path + "/approve", decision, key="stale-approval", status=409)["error"] == "employee_request_conflict"
+    assert employee.call(path)["outcome"] == {"previous_name": old_name, "display_name": change["requested_name"]}
+    assert employee.call(profile_path)["employee"]["display_name"] == change["requested_name"]
+    assert employee.call(f"{company}/payroll/my-payslips/{original_payslip}") == initial_slip
+
+    certificate = {"employment_id": employment, "kind": "employment_certificate", "reference": "PROOF-OF-SERVICE", "details": "Employment verification request"}
+    issued = employee.call(routes, certificate, key="request-certificate", status=201)
+    issued_path = f"{routes}/{issued['request_id']}"
+    admin.call(issued_path + "/approve", {**decision, "decision_ref": "CERTIFICATE-ISSUED"}, key="issue-certificate")
+    proof = employee.call(issued_path)["outcome"]
+    assert proof["employee_name"] == change["requested_name"] and proof["starts_on"] == "2026-04-01"
+    assert proof["employer"] and proof["issued_on"]
+    duplicate = employee.call(routes, {**certificate, "reference": "WITHDRAW-REQUEST"}, key="duplicate-certificate", status=201)
+    withdrawn = f"{routes}/{duplicate['request_id']}/withdraw"
+    other_employee.call(withdrawn, decision, key="withdraw-other", status=404)
+    assert employee.call(withdrawn, decision, key="withdraw-own")["state"] == "withdrawn"
+    assert [row["state"] for row in employee.call(routes)["requests"]] == ["approved", "approved", "withdrawn"]
+    assert other_employee.call(routes)["requests"] == []
+    return issued_path, certificate
+
+
 def run(origin, group):
     password = "Fixture-hcm-pass-99"
     admin = Session(origin)
@@ -647,6 +698,7 @@ def run(origin, group):
     actors = attendance_and_leave(admin, origin, credentials, company, employment_path)
     original_payroll = payroll_trial(admin, origin, credentials, company, employment_path, department_id, finance, actors)
     performance_cycle(admin, origin, company, credentials, employment_path, original_payroll, actors)
+    certificate_path, certificate = employee_services(admin, company, employee["employment_id"], original_payroll, actors[0], department_id)
 
     target_id = admin.call(
         "/api/companies",
@@ -700,6 +752,10 @@ def run(origin, group):
     receiving.call(received_path + "?on=2026-04-24", status=404)
     admin.call(employment_path + "?on=2026-04-25", status=404)
     assert admin.call(employment_path + "?on=2026-04-24")["department_id"] == finance
+    employee_session = original_payroll[2]
+    assert employee_session.call(certificate_path)["outcome"]["ends_before"] is None
+    barred = employee_session.call(company + "/employee/requests", {**certificate, "reference": "AFTER-TRANSFER"}, key="old-employment-request", status=409)
+    assert barred["error"] == "employee_request_requires_active_employment"
     retro_trial(company, original_payroll, department_id)
     admin.call(target + "/roles", {"account_id": receiving_id, "role": "payroll_reviewer"})
     payslip_inquiries(company, original_payroll, actors[0], receiving, target)
@@ -709,7 +765,7 @@ def run(origin, group):
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll, CSV and versioned performance reviews passed.")
+    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll, CSV, performance and employee service flows passed.")
 
 
 if __name__ == "__main__":

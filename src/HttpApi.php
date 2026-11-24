@@ -24,6 +24,7 @@ final class HttpApi
     private readonly PayrollInquiries $payrollInquiries;
     private readonly PayrollCosts $payrollCosts;
     private readonly Performance $performance;
+    private readonly EmployeeServices $employeeServices;
 
     public function __construct(private readonly Database $db)
     {
@@ -44,6 +45,7 @@ final class HttpApi
         $this->payrollInquiries = new PayrollInquiries($db, $operations, $this->payroll);
         $this->payrollCosts = new PayrollCosts($db);
         $this->performance = new Performance($db, $operations, $this->workforce);
+        $this->employeeServices = new EmployeeServices($db, $operations, $this->workforce);
     }
 
     public function handle(string $method, string $path): array
@@ -190,6 +192,9 @@ final class HttpApi
         if (str_starts_with($resource, 'performance/')) {
             return $this->performanceRoute($method, $resource, $actor, $company, $input);
         }
+        if (str_starts_with($resource, 'employee/')) {
+            return $this->employeeRoute($method, $resource, $actor, $company, $input);
+        }
         if (preg_match('#^employments/([0-9]{1,19})/(account|manager|shifts|attendance-certifications|leave(?:/.*)?)$#D', $resource, $match)) {
             return $this->workforceRoute($method, $match[2], $actor, $company, Input::integer($match[1], 'employment_id'), $input);
         }
@@ -306,6 +311,36 @@ final class HttpApi
             )],
             'POST/evaluation', 'POST/calibration', 'POST/amendment' => [201, $this->performance->recordRevision(
                 $actor, $company, $cycle, $participant, $action === 'evaluation' ? 'manager' : $action, $this->requestKey(), $input,
+            )],
+            default => throw new BusinessError(404, 'route_not_found'),
+        };
+    }
+
+    private function employeeRoute(string $method, string $resource, Access $actor, int $company, array $input): array
+    {
+        if ($method === 'GET' && $resource === 'employee/me') {
+            return [200, $this->employeeServices->profile($actor, $company, $_GET['on'] ?? null)];
+        }
+        if ($method === 'GET' && $resource === 'employee/review-queue') {
+            return [200, ['requests' => $this->employeeServices->reviewQueue(
+                $actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0), $_GET['state'] ?? null,
+            )]];
+        }
+        if ($resource === 'employee/requests') {
+            return match ($method) {
+                'GET' => [200, ['requests' => $this->employeeServices->myRequests($actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0))]],
+                'POST' => [201, $this->employeeServices->submit($actor, $company, $this->requestKey(), $input)],
+                default => throw new BusinessError(404, 'route_not_found'),
+            };
+        }
+        if (!preg_match('#^employee/requests/([0-9]{1,19})(?:/(approve|reject|withdraw))?$#D', $resource, $match)) {
+            throw new BusinessError(404, 'route_not_found');
+        }
+        $id = Input::integer($match[1], 'employee_request_id');
+        return match ($method . '/' . ($match[2] ?? '')) {
+            'GET/' => [200, $this->employeeServices->detail($actor, $company, $id)],
+            'POST/approve', 'POST/reject', 'POST/withdraw' => [200, $this->employeeServices->decide(
+                $actor, $company, $id, $match[2], $this->requestKey(), $input,
             )],
             default => throw new BusinessError(404, 'route_not_found'),
         };

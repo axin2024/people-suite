@@ -178,3 +178,19 @@
 | POST `/{cycle}/participants/{id}/amendment` | 键。定稿后由独立 HR 以相同字段追加修订，保留此前发布结果。 |
 
 评分为 0 至 100。主管评分按已确认目标权重汇总，四舍五入至整数。参加人本人和原评分主管须回避对该记录的 HR 校准。
+
+## 员工自助
+
+路径以 `/api/companies/{company}/employee` 开头。员工可以查询本人登记的任职资料和申请。HR 在所属法人审核申请并保留决定。
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| GET `/me` | 查看本人档案及任职。可传 `on=YYYY-MM-DD` 查询任职生效日，默认采用法人当地日期。 |
+| GET `/requests` | 查询本人申请和结果，支持 `after=ID`。 |
+| POST `/requests` | 键。传 `employment_id`、`reference`、`kind`、`details`。`kind=name_correction` 另传 `requested_name`。 |
+| GET `/requests/{id}` | 查询本人或 HR 有权审核的申请。 |
+| GET `/review-queue` | HR 查询待办或历史记录，支持 `state=pending`、`approved`、`rejected`、`withdrawn` 和 `after=ID`。 |
+| POST `/requests/{id}/approve`、`/reject` | 键。由独立 HR 传 `version`、`decision_ref`、`response` 结案。 |
+| POST `/requests/{id}/withdraw` | 键。本人传 `version`、`decision_ref`、`response` 撤回待审核申请。 |
+
+`employment_certificate` 审核通过后生成任职信息快照。`name_correction` 审核通过后更新当前员工档案，历史工资单及已登记的绩效记录继续保留当时姓名。`other` 用于不更改档案的自助事项。申请须关联当前有效任职，结束任职的旧申请仍可查询。

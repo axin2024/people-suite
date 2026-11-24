@@ -22,6 +22,7 @@ final class HttpApi
     private readonly Payroll $payroll;
     private readonly PayrollAdjustments $payrollAdjustments;
     private readonly PayrollInquiries $payrollInquiries;
+    private readonly PayrollCosts $payrollCosts;
 
     public function __construct(private readonly Database $db)
     {
@@ -40,6 +41,7 @@ final class HttpApi
             $db, $operations, $this->attendance, $this->attendanceCertifications, new PayrollCalculator(), $this->payrollAdjustments,
         );
         $this->payrollInquiries = new PayrollInquiries($db, $operations, $this->payroll);
+        $this->payrollCosts = new PayrollCosts($db);
     }
 
     public function handle(string $method, string $path): array
@@ -113,6 +115,9 @@ final class HttpApi
 
     private function route(string $method, string $path, Access $actor, array $input): array
     {
+        if ($method === 'GET' && $path === '/api/payroll/department-costs') {
+            return [200, $this->payrollCosts->forPeriod($actor, $_GET['period_start'] ?? null)];
+        }
         if ($method === 'GET' && $path === '/api/companies') {
             return [200, ['companies' => $this->db->rows(
                 'SELECT c.id, c.code, c.name, c.timezone, c.currency
@@ -241,7 +246,7 @@ final class HttpApi
                 ? $this->payrollInquiries->answer($actor, $company, $inquiry, $key, $input)
                 : $this->payrollInquiries->acknowledge($actor, $company, $inquiry, $key, $input)];
         }
-        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments))?$#D', $resource, $match)) {
+        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments|department-costs))?$#D', $resource, $match)) {
             throw new BusinessError(404, 'route_not_found');
         }
         $id = Input::integer($match[1], 'payroll_run_id');
@@ -252,6 +257,7 @@ final class HttpApi
                 $actor, $company, $id, $match[2], $this->requestKey(), $input,
             )],
             'GET/verify-closure' => [200, $this->payroll->verifyClosure($actor, $company, $id)],
+            'GET/department-costs' => [200, $this->payrollCosts->forRun($actor, $company, $id)],
             'GET/' => [200, $this->payroll->detail($actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0))],
             default => throw new BusinessError(404, 'route_not_found'),
         };

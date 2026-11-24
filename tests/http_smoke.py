@@ -219,6 +219,17 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     assert [(row["department_id"], row["base_minor"], row["facts"]["days"]) for row in detail["segments"]] == [
         (department_id, 450000, 15), (finance, 450000, 15),
     ]
+    cost_path = run_path + "/department-costs"
+    manager.call(cost_path, status=404)
+    employee.call(cost_path, status=404)
+    preview = reviewer.call(cost_path)
+    assert preview["run_state"] == "calculated" and preview["total_cost_minor"] == second["total_cost_minor"]
+    assert [(row["department_id"], row["total_cost_minor"]) for row in preview["departments"]] == [
+        (department_id, 450000), (finance, 450000),
+    ]
+    group_costs = "/api/payroll/department-costs?period_start=2026-04-01"
+    assert reviewer.call(group_costs)["companies"] == []
+    manager.call(group_costs, status=404)
 
     stale_shift = admin.call(
         employment + "/shifts",
@@ -272,6 +283,12 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     assert len(final) == 1 and final[0]["net_minor"] == 900000 and final[0]["digest"] == closed["digest"]
     employee_view = f"{payroll}/my-payslips/{final[0]['id']}"
     assert employee.call(employee_view)["payslip"]["net_minor"] == 900000
+    archived = reviewer.call(group_costs)
+    assert archived["companies"] == [reviewer.call(cost_path)]
+    assert archived["companies"][0]["digest"] == closed["digest"]
+    assert archived["totals_by_currency"] == [{
+        "currency": "CNY", "company_count": 1, "base_cost_minor": 900000, "adjustment_minor": 0, "total_cost_minor": 900000,
+    }]
     manager.call(employee_view, status=404)
     _, other_employee = create_login(admin, origin, company, credentials, "other-employee", "employee")
     assert other_employee.call(payroll + "/my-payslips")["payslips"] == []
@@ -344,6 +361,12 @@ def retro_trial(company, original, department_id):
     assert line["id"] == change["id"] and line["original_payslip_id"] == original_id
     assert line["department_id"] == department_id and line["payable_delta_minor"] == 30000
     assert "recorded_by" not in line and "notes" not in line["facts"]
+    may_cost = reviewer.call(may_path + "/department-costs")
+    entry, = may_cost["departments"]
+    assert entry["department_id"] == department_id and entry["adjustment_count"] == 1
+    assert may_cost["base_cost_minor"] == 0 and may_cost["total_cost_minor"] == entry["adjustment_minor"] == 30000
+    april_cost = reviewer.call(april_path + "/department-costs")
+    assert april_cost["total_cost_minor"] == 900000 and april_cost["adjustment_minor"] == 0
 
 
 def payslip_inquiries(company, original, manager, receiving, target):
@@ -547,10 +570,13 @@ def run(origin, group):
     retro_trial(company, original_payroll, department_id)
     admin.call(target + "/roles", {"account_id": receiving_id, "role": "payroll_reviewer"})
     payslip_inquiries(company, original_payroll, actors[0], receiving, target)
+    group_costs = "/api/payroll/department-costs?period_start=2026-04-01"
+    assert receiving.call(group_costs)["companies"] == []
+    receiving.call(original_payroll[4] + "/department-costs", status=404)
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll close, release, adjustment and inquiries passed.")
+    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll close, release, adjustments, inquiries and cost reports passed.")
 
 
 if __name__ == "__main__":

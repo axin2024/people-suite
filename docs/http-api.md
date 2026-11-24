@@ -138,3 +138,9 @@
 | POST `/inquiries/{id}/acknowledge` | 本人确认收到答复，传 `version` 和幂等键。 |
 
 核对类别为 `base_pay`、`attendance`、`withholding`、`adjustment` 或 `other`。疑问和答复仅写入核对记录，已发布工资单及封账摘要可以独立回读。
+
+### 部门成本
+
+`GET /runs/{id}/department-costs` 返回该账期最近一次试算的部门分摊、差额、状态和封账摘要。原工资成本按任职分段归属，补差按原工资行部门归属。未完成的试算同时返回阻断人数。
+
+`GET /api/payroll/department-costs?period_start=2026-04-01` 汇总各法人已封账或已发布的当月成本，按币种分别给出合计。两种查看方式均向制单与复核角色开放，返回范围以法人授权为准。

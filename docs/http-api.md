@@ -113,10 +113,16 @@
 
 | 方法与后缀 | 状态约束 |
 | --- | --- |
-| POST `/runs/{id}/submit` | 制单人送审自己的试算。试算应包含至少一位员工且所有工资单均已就绪。 |
+| POST `/runs/{id}/submit` | 制单人送审自己的试算。试算应包含至少一位员工，所有工资单均已就绪，且已纳入当期全部补差。 |
 | POST `/runs/{id}/return` | 独立复核人退回，保留试算与决定记录。 |
-| POST `/runs/{id}/close` | 独立复核人对当前试算封账，记录规则、试算单和分段金额的 SHA-256 摘要。 |
+| POST `/runs/{id}/close` | 独立复核人对当前试算封账，记录规则、试算单、分段金额和补差的 SHA-256 摘要。 |
 | GET `/runs/{id}/verify-closure` | 对封账内容重算摘要，返回 `valid`。 |
 | POST `/runs/{id}/publish` | 独立复核人发布。系统重新核对封账摘要。 |
 | GET `/my-payslips` | 本人已发布工资单，可用 `?after=ID` 分页。 |
 | GET `/my-payslips/{id}` | 本人指定已发布工资单与封账摘要。 |
+
+### 追溯补差
+
+`POST /runs/{id}/adjustments` 由制单人操作，目标是可编辑的后续账期。传 `original_payslip_id`、`original_line_no`、`decision_ref`、`corrected_monthly_minor`、`notes` 和幂等键。再次修订同一行时，传最新回执的 `previous_adjustment_id`。回执包含原行金额、前次重算、此次重算、原工资单总额及本次差额。同一历史行及决定编号重复提交会返回同一笔补差，字段变化会返回冲突。
+
+补差沿用原行的分摊天数、部门和扣缴规则。下一次试算纳入差额，原法人已经没有当期任职的员工会收到单独的补差单。工资单的 `net_minor` 保留当期正常净额，`payable_minor` 包含补差，`adjustments` 记录来源和金额。

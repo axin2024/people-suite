@@ -20,6 +20,7 @@ final class HttpApi
     private readonly AttendanceCertifications $attendanceCertifications;
     private readonly Leave $leave;
     private readonly Payroll $payroll;
+    private readonly PayrollAdjustments $payrollAdjustments;
 
     public function __construct(private readonly Database $db)
     {
@@ -33,7 +34,10 @@ final class HttpApi
         $this->attendanceImports = new AttendanceImports($db, $operations, $this->attendance);
         $this->attendanceCertifications = new AttendanceCertifications($db, $operations, $this->workforce, $this->attendance);
         $this->leave = new Leave($db, $operations, $this->workforce);
-        $this->payroll = new Payroll($db, $operations, $this->attendance, $this->attendanceCertifications, new PayrollCalculator());
+        $this->payrollAdjustments = new PayrollAdjustments($db, $operations);
+        $this->payroll = new Payroll(
+            $db, $operations, $this->attendance, $this->attendanceCertifications, new PayrollCalculator(), $this->payrollAdjustments,
+        );
     }
 
     public function handle(string $method, string $path): array
@@ -213,12 +217,13 @@ final class HttpApi
         if ($method === 'GET' && preg_match('#^payroll/my-payslips/([0-9]{1,19})$#D', $resource, $match)) {
             return [200, $this->payroll->myPayslip($actor, $company, Input::integer($match[1], 'payslip_id'))];
         }
-        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure))?$#D', $resource, $match)) {
+        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments))?$#D', $resource, $match)) {
             throw new BusinessError(404, 'route_not_found');
         }
         $id = Input::integer($match[1], 'payroll_run_id');
         return match ($method . '/' . ($match[2] ?? '')) {
             'POST/trial' => [200, $this->payroll->trial($actor, $company, $id, $this->requestKey(), $input)],
+            'POST/adjustments' => [201, $this->payrollAdjustments->record($actor, $company, $id, $this->requestKey(), $input)],
             'POST/submit', 'POST/return', 'POST/close', 'POST/publish' => [200, $this->payroll->review(
                 $actor, $company, $id, $match[2], $this->requestKey(), $input,
             )],

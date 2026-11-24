@@ -276,6 +276,74 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     _, other_employee = create_login(admin, origin, company, credentials, "other-employee", "employee")
     assert other_employee.call(payroll + "/my-payslips")["payslips"] == []
     other_employee.call(employee_view, status=404)
+    return maker, reviewer, employee, other_employee, run_path, final[0]["id"], closed["digest"]
+
+
+def retro_trial(company, original, department_id):
+    maker, reviewer, employee, other_employee, april_path, original_id, original_digest = original
+    payroll = company + "/payroll"
+    employee_path = payroll + "/my-payslips"
+    april_slip_path = f"{employee_path}/{original_id}"
+    april_slip = employee.call(april_slip_path)
+    rule = maker.call(
+        payroll + "/rules", {"rule_ref": "ACTUAL-DAYS", "title": "Calendar days", "proration_basis": "actual_days"},
+        key="calendar-rule", status=201,
+    )["rule_id"]
+    run = maker.call(payroll + "/runs", {"period_start": "2026-05-01"}, key="may-run", status=201)
+    may_path = f"{payroll}/runs/{run['run_id']}"
+    cut = maker.call(company + "/attendance/watermark")["watermark"]
+    trial_input = {"version": run["version"], "rule_id": rule, "attendance_watermark": cut}
+    empty = maker.call(may_path + "/trial", trial_input, key="may-empty-trial")
+    assert empty["eligible_count"] == 0 and empty["payable_minor"] == 0
+
+    adjustment = {
+        "original_payslip_id": original_id, "original_line_no": 1, "decision_ref": "APRIL-RATE-CORRECTION",
+        "corrected_monthly_minor": 960000, "notes": "Approved revision for first April assignment",
+    }
+    adjustment_path = may_path + "/adjustments"
+    reviewer.call(adjustment_path, adjustment, key="reviewer-retro", status=404)
+    maker.call(adjustment_path, {**adjustment, "original_line_no": 3}, key="wrong-line", status=404)
+    change = maker.call(adjustment_path, adjustment, key="may-retro", status=201)
+    assert change == maker.call(adjustment_path, adjustment, key="may-retro", status=201)
+    assert change == maker.call(adjustment_path, adjustment, key="may-retro-retry", status=201)
+    assert change["original_minor"] == 450000 and change["recalculated_minor"] == 480000
+    assert change["original_gross_minor"] == 900000 and change["recalculated_gross_minor"] == 930000
+    assert change["payable_delta_minor"] == 30000 and change["department_id"] == department_id
+    assert maker.call(
+        adjustment_path, {**adjustment, "corrected_monthly_minor": 970000}, key="may-retro-conflict", status=409,
+    )["error"] == "payroll_adjustment_decision_conflict"
+    assert maker.call(
+        adjustment_path, {**adjustment, "decision_ref": "STALE-REVISION"}, key="may-retro-baseline", status=409,
+    )["error"] == "payroll_adjustment_baseline_changed"
+
+    review_input = {"version": empty["version"], "decision_ref": "MAY-SEND", "notes": "Check supplementary payroll"}
+    assert maker.call(
+        may_path + "/submit", review_input, key="may-submit", status=409,
+    )["error"] == "payroll_adjustments_require_new_trial"
+    trial = maker.call(may_path + "/trial", {**trial_input, "version": empty["version"]}, key="may-ready-trial")
+    assert trial["eligible_count"] == 1 and trial["gross_minor"] == 0 and trial["blocked_count"] == 0
+    assert trial["gross_adjustment_minor"] == trial["payable_minor"] == trial["total_cost_minor"] == 30000
+    summary = reviewer.call(may_path)
+    assert summary["trial"]["payable_minor"] == 30000 and len(summary["payslips"]) == 1
+    new_id = summary["payslips"][0]["id"]
+    may_slip_path = f"{employee_path}/{new_id}"
+    employee.call(may_slip_path, status=404)
+    submitted = maker.call(may_path + "/submit", {**review_input, "version": trial["version"]}, key="may-submit")
+    closed = reviewer.call(may_path + "/close", {**review_input, "version": submitted["version"], "decision_ref": "MAY-CLOSE"}, key="may-close")
+    assert reviewer.call(may_path + "/verify-closure")["valid"]
+    reviewer.call(may_path + "/publish", {**review_input, "version": closed["version"], "decision_ref": "MAY-PUBLISH"}, key="may-publish")
+    assert change == maker.call(adjustment_path, adjustment, key="may-retro-after-close", status=201)
+    assert employee.call(april_slip_path) == april_slip
+    assert reviewer.call(april_path + "/verify-closure")["digest"] == original_digest
+    assert reviewer.call(april_path + "/verify-closure")["valid"]
+    other_employee.call(may_slip_path, status=404)
+    assert [slip["payable_minor"] for slip in employee.call(employee_path)["payslips"]] == [900000, 30000]
+    released = employee.call(may_slip_path)
+    assert released["payslip"]["payable_minor"] == 30000 and released["segments"] == []
+    line, = released["adjustments"]
+    assert line["id"] == change["id"] and line["original_payslip_id"] == original_id
+    assert line["department_id"] == department_id and line["payable_delta_minor"] == 30000
+    assert "recorded_by" not in line and "notes" not in line["facts"]
 
 
 def run(origin, group):
@@ -379,7 +447,7 @@ def run(origin, group):
     assert admin.call(employment_path + "/contracts", renewal, key="renew")["version"] == 2
     assert [c["reference"] for c in admin.call(employment_path)["contracts"]] == ["C-001", "C-002"]
     actors = attendance_and_leave(admin, origin, credentials, company, employment_path)
-    payroll_trial(admin, origin, credentials, company, employment_path, department_id, finance, actors)
+    original_payroll = payroll_trial(admin, origin, credentials, company, employment_path, department_id, finance, actors)
 
     target_id = admin.call(
         "/api/companies",
@@ -433,10 +501,11 @@ def run(origin, group):
     receiving.call(received_path + "?on=2026-04-24", status=404)
     admin.call(employment_path + "?on=2026-04-25", status=404)
     assert admin.call(employment_path + "?on=2026-04-24")["department_id"] == finance
+    retro_trial(company, original_payroll, department_id)
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, attendance, leave, legal transfer, and separated payroll close and release passed.")
+    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll close, release and retroactive adjustment passed.")
 
 
 if __name__ == "__main__":

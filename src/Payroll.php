@@ -14,6 +14,7 @@ final class Payroll
         private readonly Attendance $attendance,
         private readonly AttendanceCertifications $certifications,
         private readonly PayrollCalculator $calculator,
+        private readonly PayrollAdjustments $adjustments,
     ) {
     }
 
@@ -124,6 +125,7 @@ final class Payroll
                     $summary[$total] += $calculated[$total];
                 }
             }
+            $summary['eligible_count'] += $this->adjustments->attachToTrial($scope, $id, $trialId);
             $this->db->run(
                 'UPDATE payroll_trials SET eligible_count=?, blocked_count=?, gross_minor=?, net_minor=?, cost_minor=? WHERE id=?',
                 [...array_values($summary), $trialId],
@@ -138,7 +140,7 @@ final class Payroll
             ]);
             return [
                 'run_id' => $id, 'trial_id' => $trialId, 'version' => $version + 1, 'trial_revision' => $revision,
-                'state' => 'calculated', 'attendance_watermark' => $watermark, ...$summary,
+                'state' => 'calculated', 'attendance_watermark' => $watermark, ...$this->withAdjustedTotals($scope, $trialId, $summary),
             ];
         }, repeatableRead: true);
     }
@@ -162,12 +164,14 @@ final class Payroll
             $payslip['facts'] = json_decode($payslip['facts'], true, flags: JSON_THROW_ON_ERROR);
         }
         unset($payslip);
+        $payslips = $this->adjustments->withPayableAmounts($scope, $payslips);
         $reviews = $this->db->rows(
             'SELECT trial_id, resulting_version, actor_id, action, decision_ref, notes, recorded_at
              FROM payroll_review_events WHERE group_id=? AND company_id=? AND run_id=? ORDER BY resulting_version',
             [...$scope, $id],
         );
-        return ['run' => $run, 'trial' => $trial, 'payslips' => $payslips, 'review_events' => $reviews,
+        return ['run' => $run, 'trial' => $this->withAdjustedTotals($scope, (int) $trial['id'], $trial),
+            'payslips' => $payslips, 'review_events' => $reviews,
             'closure' => $this->closure($scope, $id)];
     }
 
@@ -198,6 +202,9 @@ final class Payroll
             }
             if ($action !== 'submit' && $preparedByActor) {
                 throw new BusinessError(403, 'payroll_reviewer_must_differ');
+            }
+            if ($action === 'submit') {
+                $this->adjustments->assertIncluded($scope, $id, (int) $trial['id']);
             }
             if ($action === 'submit' && ((int) $trial['blocked_count'] > 0 || (int) $trial['eligible_count'] === 0)) {
                 throw new BusinessError(409, 'payroll_trial_blocked', [
@@ -259,7 +266,8 @@ final class Payroll
     public function myPayslips(Access $actor, int $company, int $after): array
     {
         $actor->company($company, 'employee');
-        return $this->db->rows(
+        $scope = [$actor->groupId, $company];
+        $payslips = $this->db->rows(
             'SELECT p.id, r.period_start, r.period_end, p.gross_minor, p.absence_minor, p.withholding_minor, p.net_minor, c.digest
              FROM payslips p JOIN employments w ON w.group_id=p.group_id AND w.company_id=p.company_id AND w.id=p.employment_id
              JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
@@ -267,8 +275,9 @@ final class Payroll
              JOIN payroll_runs r ON r.group_id=c.group_id AND r.company_id=c.company_id AND r.id=c.run_id
              WHERE p.group_id=? AND p.company_id=? AND e.account_id=? AND p.id>?
                AND r.state=? ORDER BY p.id LIMIT 100',
-            [$actor->groupId, $company, $actor->accountId, $after, 'published'],
+            [...$scope, $actor->accountId, $after, 'published'],
         );
+        return $this->adjustments->withPayableAmounts($scope, $payslips);
     }
 
     public function myPayslip(Access $actor, int $company, int $id): array
@@ -283,7 +292,7 @@ final class Payroll
              WHERE p.group_id=? AND p.company_id=? AND e.account_id=? AND p.id=? AND r.state=?',
             [$actor->groupId, $company, $actor->accountId, $id, 'published'],
         ) ?? throw new BusinessError(404, 'payslip_not_found');
-        return [...$summary, ...$this->storedPayslip($actor, $company, $id)];
+        return [...$summary, ...$this->storedPayslip($actor, $company, $id, employeeView: true)];
     }
 
     public function payslip(Access $actor, int $company, int $id): array
@@ -292,7 +301,7 @@ final class Payroll
         return $this->storedPayslip($actor, $company, $id);
     }
 
-    private function storedPayslip(Access $actor, int $company, int $id): array
+    private function storedPayslip(Access $actor, int $company, int $id, bool $employeeView = false): array
     {
         $scope = [$actor->groupId, $company, $id];
         $record = $this->db->row(
@@ -311,7 +320,18 @@ final class Payroll
             $segment['facts'] = json_decode($segment['facts'], true, flags: JSON_THROW_ON_ERROR);
         }
         unset($segment);
-        return ['payslip' => $record, 'segments' => $segments];
+        $adjustments = $this->adjustments->forPayslip([$actor->groupId, $company], $id, $employeeView);
+        $record['payable_minor'] = $record['net_minor'] === null
+            ? null : (int) $record['net_minor'] + array_sum(array_column($adjustments, 'payable_delta_minor'));
+        return ['payslip' => $record, 'segments' => $segments, 'adjustments' => $adjustments];
+    }
+
+    private function withAdjustedTotals(array $scope, int $trial, array $summary): array
+    {
+        $adjustments = $this->adjustments->totals($scope, $trial);
+        return [...$summary, ...$adjustments,
+            'payable_minor' => (int) $summary['net_minor'] + $adjustments['adjustment_minor'],
+            'total_cost_minor' => (int) $summary['cost_minor'] + $adjustments['gross_adjustment_minor']];
     }
 
     private function currentTrial(array $scope, array $run): array
@@ -358,6 +378,9 @@ final class Payroll
         );
         foreach ($segments as $segment) {
             hash_update($hash, json_encode($segment, JSON_THROW_ON_ERROR) . "\n");
+        }
+        foreach ($this->adjustments->forTrial($scope, (int) $trial['id']) as $adjustment) {
+            hash_update($hash, json_encode(['payroll-adjustment-v1', $adjustment], JSON_THROW_ON_ERROR) . "\n");
         }
         return hash_final($hash);
     }

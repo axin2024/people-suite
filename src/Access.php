@@ -37,6 +37,29 @@ final class Access
         ), 'role');
     }
 
+    public function employeeRecords(int $company): bool
+    {
+        $current = in_array('employee', $this->roles($company), true);
+        if (!$current && !$this->archiveGranted($company)) {
+            throw new BusinessError(404, 'company_not_found');
+        }
+        return $current;
+    }
+
+    public function archiveGranted(int $company, ?int $employment = null): bool
+    {
+        $scope = [$this->groupId, $company, $this->accountId];
+        $filter = '';
+        if ($employment !== null) {
+            $filter = ' AND employment_id=?';
+            $scope[] = $employment;
+        }
+        return $this->db->row(
+            'SELECT 1 FROM archived_employment_access WHERE group_id=? AND company_id=? AND account_id=?' . $filter . ' LIMIT 1',
+            $scope,
+        ) !== null;
+    }
+
     public function recruitment(int $companyId, int $positionId): void
     {
         $this->company($companyId, 'hr', 'recruiter');

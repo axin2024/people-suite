@@ -36,6 +36,7 @@ final class Attendance
                 throw new BusinessError(422, 'shift_must_start_on_workday');
             }
             $this->workforce->lockEmployment($actor, $company, $employment, $day);
+            $this->workforce->requireNewWorkAllowed($actor, $company, $employment, $day);
             $scope = [$actor->groupId, $company, $employment];
             $overlap = $this->db->row(
                 "SELECT id, workday FROM shifts WHERE group_id=? AND company_id=? AND employment_id=? AND state='scheduled'

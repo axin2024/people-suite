@@ -194,3 +194,19 @@
 | POST `/requests/{id}/withdraw` | 键。本人传 `version`、`decision_ref`、`response` 撤回待审核申请。 |
 
 `employment_certificate` 审核通过后生成任职信息快照。`name_correction` 审核通过后更新当前员工档案，历史工资单及已登记的绩效记录继续保留当时姓名。`other` 用于不更改档案的自助事项。申请须关联当前有效任职，结束任职的旧申请仍可查询。
+
+## 离职交接
+
+路径以 `/api/companies/{company}/offboarding` 开头。HR 按当前任职版本发起离职，`ends_before` 是法人当地日期下第一个无任职关系的自然日。
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| GET 根路径 | 列出当前角色可见的离职单，支持 `after=ID`。 |
+| POST 根路径 | 键。HR 传 `employment_id`、`assignment_version`、`ends_before`、`reference`、`reason`，可附带由 `code` 和 `label` 组成的 `equipment` 清单。 |
+| GET `/{case}` | 查询离职状态及可见的清单。HR 同时查看阻塞办结的事项。 |
+| POST `/{case}/tasks/{code}/confirm` | 键。责任人传 `version`、`decision_ref`、`evidence`。 |
+| POST `/{case}/complete`、`/cancel` | 键。由独立 HR 传 `version`、`decision_ref`。 |
+
+发起后暂停新增员工申请、请假和工资核对，同时禁止从离职生效日起新增排班。直属主管负责业务交接，薪资复核人确认结算事项，HR 确认权限与设备。设备、员工申请、假勤或工资核对仍有待办时，办结请求返回 `offboarding_clearance_incomplete` 及责任清单。
+
+达到生效日且全部清单确认后，系统在同一事务结束任职、汇报线和编制占用，收回该法人业务角色。员工可继续登录领取该任职的已发布个人工资单、既有服务申请结果和已定稿绩效。离职当月的薪资按任职有效期计算。

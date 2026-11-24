@@ -265,7 +265,7 @@ final class Payroll
 
     public function myPayslips(Access $actor, int $company, int $after): array
     {
-        $actor->company($company, 'employee');
+        $current = $actor->employeeRecords($company);
         $scope = [$actor->groupId, $company];
         $payslips = $this->db->rows(
             'SELECT p.id, r.period_start, r.period_end, p.gross_minor, p.absence_minor, p.withholding_minor, p.net_minor, c.digest
@@ -274,8 +274,10 @@ final class Payroll
              JOIN payroll_closures c ON c.group_id=p.group_id AND c.company_id=p.company_id AND c.trial_id=p.trial_id
              JOIN payroll_runs r ON r.group_id=c.group_id AND r.company_id=c.company_id AND r.id=c.run_id
              WHERE p.group_id=? AND p.company_id=? AND e.account_id=? AND p.id>?
-               AND r.state=? ORDER BY p.id LIMIT 100',
-            [...$scope, $actor->accountId, $after, 'published'],
+               AND r.state=? AND (? OR EXISTS (SELECT 1 FROM archived_employment_access a WHERE a.group_id=p.group_id
+                   AND a.company_id=p.company_id AND a.employment_id=p.employment_id AND a.account_id=e.account_id))
+             ORDER BY p.id LIMIT 100',
+            [...$scope, $actor->accountId, $after, 'published', (int) $current],
         );
         return $this->adjustments->withPayableAmounts($scope, $payslips);
     }
@@ -283,14 +285,15 @@ final class Payroll
     public function myPayslip(Access $actor, int $company, int $id): array
     {
         $summary = $this->publishedSummary($actor, $company, $id);
+        unset($summary['employment_id']);
         return [...$summary, ...$this->storedPayslip($actor, $company, $id, employeeView: true)];
     }
 
     public function publishedSummary(Access $actor, int $company, int $id): array
     {
-        $actor->company($company, 'employee');
-        return $this->db->row(
-            'SELECT r.period_start, r.period_end, c.digest
+        $current = $actor->employeeRecords($company);
+        $summary = $this->db->row(
+            'SELECT r.period_start, r.period_end, c.digest, p.employment_id
              FROM payslips p JOIN employments w ON w.group_id=p.group_id AND w.company_id=p.company_id AND w.id=p.employment_id
              JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
              JOIN payroll_closures c ON c.group_id=p.group_id AND c.company_id=p.company_id AND c.trial_id=p.trial_id
@@ -298,6 +301,10 @@ final class Payroll
              WHERE p.group_id=? AND p.company_id=? AND e.account_id=? AND p.id=? AND r.state=?',
             [$actor->groupId, $company, $actor->accountId, $id, 'published'],
         ) ?? throw new BusinessError(404, 'payslip_not_found');
+        if (!$current && !$actor->archiveGranted($company, (int) $summary['employment_id'])) {
+            throw new BusinessError(404, 'payslip_not_found');
+        }
+        return $summary;
     }
 
     public function payslip(Access $actor, int $company, int $id): array

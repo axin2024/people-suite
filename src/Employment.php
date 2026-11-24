@@ -249,6 +249,7 @@ final class Employment
                ON w.group_id=t.group_id AND w.company_id=t.source_company_id AND w.id=t.source_employment_id
              JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
              WHERE t.group_id=? AND t.target_company_id=? AND t.state='pending' AND t.id>?
+               AND w.assignment_version=t.source_version AND w.ends_before IS NULL
              ORDER BY t.id LIMIT 100",
             [$actor->groupId, $company, $after],
         );
@@ -343,6 +344,7 @@ final class Employment
         array $known,
         int $version,
         string $from,
+        bool $offboarding = false,
     ): array {
         $this->db->row('SELECT id FROM employees WHERE group_id=? AND id=? FOR UPDATE', [
             $actor->groupId, $record['employee_id'],
@@ -356,7 +358,33 @@ final class Employment
                 'from' => $prior['effective_from'], 'until' => $prior['effective_until'],
             ]);
         }
+        if (!$offboarding && $this->db->row(
+            "SELECT id FROM offboarding_cases WHERE group_id=? AND company_id=? AND employment_id=? AND state='in_progress'",
+            [$actor->groupId, $company, $employment],
+        ) !== null) {
+            throw new BusinessError(409, 'offboarding_new_work_frozen');
+        }
         return $prior;
+    }
+
+    public function lockOffboardingCutover(Access $actor, int $company, int $employment, int $version, string $until): array
+    {
+        $record = $this->employment($actor, $company, $employment, false);
+        $known = $this->latestAssignment($actor, $company, $employment);
+        $this->lockPositions($actor, [(int) $known['position_id'] => $company]);
+        $assignment = $this->lockCutover($actor, $company, $employment, $record, $known, $version, $until, offboarding: true);
+        $identity = $this->db->row('SELECT account_id FROM employees WHERE group_id=? AND id=?', [$actor->groupId, $record['employee_id']]);
+        return ['assignment' => $assignment, 'employee_id' => (int) $record['employee_id'], 'account_id' => $identity['account_id']];
+    }
+
+    public function applyOffboardingEnd(Access $actor, int $company, int $employment, array $assignment, string $until): void
+    {
+        $scope = [$actor->groupId, $company, $employment];
+        $this->endAssignment($assignment, $until);
+        $this->db->run('UPDATE employments SET ends_before=?, assignment_version=assignment_version+1 WHERE group_id=? AND company_id=? AND id=?',
+            [$until, ...$scope]);
+        $this->db->run('UPDATE reporting_lines SET effective_until=? WHERE group_id=? AND company_id=? AND employment_id=?
+            AND effective_from<? AND (effective_until IS NULL OR effective_until>?)', [$until, ...$scope, $until, $until]);
     }
 
     private function endAssignment(array $assignment, string $from): void

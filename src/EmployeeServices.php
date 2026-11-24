@@ -4,9 +4,6 @@ declare(strict_types=1);
 
 namespace PeopleSuite;
 
-use DateTimeImmutable;
-use DateTimeZone;
-
 final class EmployeeServices
 {
     private const REQUEST_COLUMNS = 'id, employment_id, employee_account_id, reference, kind, details, requested_name, state,
@@ -21,8 +18,8 @@ final class EmployeeServices
 
     public function profile(Access $actor, int $company, mixed $on): array
     {
-        $actor->company($company, 'employee');
-        $day = $on === null ? $this->companyToday($actor, $company) : Input::date($on, 'on');
+        $current = $actor->employeeRecords($company);
+        $day = $on === null ? $this->workforce->companyToday($actor, $company) : Input::date($on, 'on');
         $person = $this->db->row(
             'SELECT id, employee_code, display_name FROM employees WHERE group_id=? AND account_id=?',
             [$actor->groupId, $actor->accountId],
@@ -34,8 +31,10 @@ final class EmployeeServices
                 AND a.employment_id=w.id AND a.effective_from<=? AND (a.effective_until IS NULL OR a.effective_until>?)
              LEFT JOIN position_revisions r ON r.group_id=a.group_id AND r.company_id=a.company_id AND r.id=a.position_revision_id
              LEFT JOIN departments d ON d.group_id=a.group_id AND d.company_id=a.company_id AND d.id=a.department_id
-             WHERE w.group_id=? AND w.company_id=? AND w.employee_id=? ORDER BY w.starts_on DESC',
-            [$day, $day, $actor->groupId, $company, $person['id']],
+             WHERE w.group_id=? AND w.company_id=? AND w.employee_id=?
+              AND (? OR EXISTS (SELECT 1 FROM archived_employment_access x WHERE x.group_id=w.group_id AND x.company_id=w.company_id
+                  AND x.employment_id=w.id AND x.account_id=?)) ORDER BY w.starts_on DESC',
+            [$day, $day, $actor->groupId, $company, $person['id'], (int) $current, $actor->accountId],
         );
         if ($records === []) {
             throw new BusinessError(404, 'employee_profile_not_found');
@@ -61,6 +60,7 @@ final class EmployeeServices
             function () use ($actor, $company, $request): array {
                 $employment = $request['employment_id'];
                 $worker = $this->workforce->lockEmployment($actor, $company, $employment);
+                $actor->company($company, 'employee');
                 if (!$this->workforce->isSelf($actor->groupId, (int) $worker['employee_id'], $actor->accountId)) {
                     throw new BusinessError(404, 'employment_not_found');
                 }
@@ -78,7 +78,8 @@ final class EmployeeServices
                     }
                     return self::submitted((int) $previous['id'], $request['reference']);
                 }
-                $day = $this->companyToday($actor, $company);
+                $this->workforce->requireNewWorkAllowed($actor, $company, $employment);
+                $day = $this->workforce->companyToday($actor, $company);
                 if ($day < $worker['starts_on'] || ($worker['ends_before'] !== null && $day >= $worker['ends_before'])) {
                     throw new BusinessError(409, 'employee_request_requires_active_employment');
                 }
@@ -97,11 +98,13 @@ final class EmployeeServices
 
     public function myRequests(Access $actor, int $company, int $after): array
     {
-        $actor->company($company, 'employee');
+        $current = $actor->employeeRecords($company);
         $rows = $this->db->rows(
-            'SELECT ' . self::REQUEST_COLUMNS . ' FROM employee_requests
-             WHERE group_id=? AND company_id=? AND employee_account_id=? AND id>? ORDER BY id LIMIT 100',
-            [$actor->groupId, $company, $actor->accountId, $after],
+            'SELECT ' . self::REQUEST_COLUMNS . ' FROM employee_requests r
+             WHERE r.group_id=? AND r.company_id=? AND r.employee_account_id=? AND r.id>?
+               AND (? OR EXISTS (SELECT 1 FROM archived_employment_access x WHERE x.group_id=r.group_id AND x.company_id=r.company_id
+                 AND x.employment_id=r.employment_id AND x.account_id=r.employee_account_id)) ORDER BY r.id LIMIT 100',
+            [$actor->groupId, $company, $actor->accountId, $after, (int) $current],
         );
         return array_map($this->employeeView(...), $rows);
     }
@@ -128,7 +131,8 @@ final class EmployeeServices
         if (in_array('hr', $roles, true)) {
             return $this->decodeOutcome($record);
         }
-        if (!in_array('employee', $roles, true) || (int) $record['employee_account_id'] !== $actor->accountId) {
+        if ((int) $record['employee_account_id'] !== $actor->accountId || (!in_array('employee', $roles, true)
+            && !$actor->archiveGranted($company, (int) $record['employment_id']))) {
             throw new BusinessError(404, 'employee_request_not_found');
         }
         return $this->employeeView($record);
@@ -192,7 +196,7 @@ final class EmployeeServices
         if ($request['kind'] === 'employment_certificate') {
             $employer = $this->db->row('SELECT name FROM companies WHERE group_id=? AND id=?', [$actor->groupId, $company]);
             return ['employer' => $employer['name'], 'employee_code' => $person['employee_code'], 'employee_name' => $person['display_name'],
-                'starts_on' => $worker['starts_on'], 'ends_before' => $worker['ends_before'], 'issued_on' => $this->companyToday($actor, $company)];
+                'starts_on' => $worker['starts_on'], 'ends_before' => $worker['ends_before'], 'issued_on' => $this->workforce->companyToday($actor, $company)];
         }
         return ['review_completed' => true];
     }
@@ -201,13 +205,6 @@ final class EmployeeServices
     {
         return $this->db->row('SELECT ' . self::REQUEST_COLUMNS . ' FROM employee_requests WHERE group_id=? AND company_id=? AND id=?'
             . ($lock ? ' FOR UPDATE' : ''), $scope) ?? throw new BusinessError(404, 'employee_request_not_found');
-    }
-
-    private function companyToday(Access $actor, int $company): string
-    {
-        $companyRow = $this->db->row('SELECT timezone FROM companies WHERE group_id=? AND id=?', [$actor->groupId, $company])
-            ?? throw new BusinessError(404, 'company_not_found');
-        return (new DateTimeImmutable('today', new DateTimeZone($companyRow['timezone'])))->format('Y-m-d');
     }
 
     private function employeeView(array $row): array

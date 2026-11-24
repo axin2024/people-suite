@@ -25,6 +25,7 @@ final class HttpApi
     private readonly PayrollCosts $payrollCosts;
     private readonly Performance $performance;
     private readonly EmployeeServices $employeeServices;
+    private readonly Offboarding $offboarding;
 
     public function __construct(private readonly Database $db)
     {
@@ -42,10 +43,11 @@ final class HttpApi
         $this->payroll = new Payroll(
             $db, $operations, $this->attendance, $this->attendanceCertifications, new PayrollCalculator(), $this->payrollAdjustments,
         );
-        $this->payrollInquiries = new PayrollInquiries($db, $operations, $this->payroll);
+        $this->payrollInquiries = new PayrollInquiries($db, $operations, $this->payroll, $this->workforce);
         $this->payrollCosts = new PayrollCosts($db);
         $this->performance = new Performance($db, $operations, $this->workforce);
         $this->employeeServices = new EmployeeServices($db, $operations, $this->workforce);
+        $this->offboarding = new Offboarding($db, $operations, $this->employment, $this->workforce);
     }
 
     public function handle(string $method, string $path): array
@@ -129,8 +131,9 @@ final class HttpApi
                  FROM companies c WHERE c.group_id=? AND (
                     EXISTS (SELECT 1 FROM company_roles r WHERE r.group_id=c.group_id AND r.company_id=c.id AND r.account_id=?)
                     OR EXISTS (SELECT 1 FROM group_administrators a WHERE a.group_id=c.group_id AND a.account_id=?)
+                    OR EXISTS (SELECT 1 FROM archived_employment_access x WHERE x.group_id=c.group_id AND x.company_id=c.id AND x.account_id=?)
                  ) ORDER BY c.code, c.id',
-                [$actor->groupId, $actor->accountId, $actor->accountId],
+                [$actor->groupId, $actor->accountId, $actor->accountId, $actor->accountId],
             )]];
         }
         if ($method === 'POST' && $path === '/api/companies') {
@@ -194,6 +197,9 @@ final class HttpApi
         }
         if (str_starts_with($resource, 'employee/')) {
             return $this->employeeRoute($method, $resource, $actor, $company, $input);
+        }
+        if ($resource === 'offboarding' || str_starts_with($resource, 'offboarding/')) {
+            return $this->offboardingRoute($method, $resource, $actor, $company, $input);
         }
         if (preg_match('#^employments/([0-9]{1,19})/(account|manager|shifts|attendance-certifications|leave(?:/.*)?)$#D', $resource, $match)) {
             return $this->workforceRoute($method, $match[2], $actor, $company, Input::integer($match[1], 'employment_id'), $input);
@@ -342,6 +348,30 @@ final class HttpApi
             'POST/approve', 'POST/reject', 'POST/withdraw' => [200, $this->employeeServices->decide(
                 $actor, $company, $id, $match[2], $this->requestKey(), $input,
             )],
+            default => throw new BusinessError(404, 'route_not_found'),
+        };
+    }
+
+    private function offboardingRoute(string $method, string $resource, Access $actor, int $company, array $input): array
+    {
+        if ($resource === 'offboarding') {
+            return match ($method) {
+                'GET' => [200, ['cases' => $this->offboarding->cases($actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0))]],
+                'POST' => [201, $this->offboarding->start($actor, $company, $this->requestKey(), $input)],
+                default => throw new BusinessError(404, 'route_not_found'),
+            };
+        }
+        if ($method === 'POST' && preg_match('#^offboarding/([0-9]{1,19})/tasks/([A-Za-z0-9._-]{1,48})/confirm$#D', $resource, $match)) {
+            return [200, $this->offboarding->confirm($actor, $company, Input::integer($match[1], 'case_id'),
+                Input::code($match[2], 'task_code'), $this->requestKey(), $input)];
+        }
+        if (!preg_match('#^offboarding/([0-9]{1,19})(?:/(complete|cancel))?$#D', $resource, $match)) {
+            throw new BusinessError(404, 'route_not_found');
+        }
+        $case = Input::integer($match[1], 'case_id');
+        return match ($method . '/' . ($match[2] ?? '')) {
+            'GET/' => [200, $this->offboarding->detail($actor, $company, $case)],
+            'POST/complete', 'POST/cancel' => [200, $this->offboarding->decide($actor, $company, $case, $match[2], $this->requestKey(), $input)],
             default => throw new BusinessError(404, 'route_not_found'),
         };
     }

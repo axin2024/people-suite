@@ -44,6 +44,16 @@ final class Organization
         return $this->db->transaction(function () use ($actor, $company, $account, $role): array {
             $this->knownCompany($actor, $company);
             $this->knownAccount($actor, $account);
+            if ($this->db->row(
+                "SELECT c.id FROM offboarding_cases c WHERE c.group_id=? AND c.company_id=? AND c.employee_account_id=?
+                 AND (c.state='in_progress' OR (c.state='completed' AND NOT EXISTS (
+                     SELECT 1 FROM employments w JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
+                     WHERE w.group_id=c.group_id AND w.company_id=c.company_id AND e.account_id=c.employee_account_id
+                       AND w.starts_on>=c.ends_before AND w.ends_before IS NULL
+                 ))) LIMIT 1", [$actor->groupId, $company, $account],
+            ) !== null) {
+                throw new BusinessError(409, 'offboarding_role_grants_locked');
+            }
             $grant = $this->db->run(
                 'INSERT INTO company_roles (group_id, company_id, account_id, role) VALUES (?, ?, ?, ?)
                  ON DUPLICATE KEY UPDATE role=company_roles.role',
@@ -352,7 +362,7 @@ final class Organization
 
     private function knownAccount(Access $actor, int $account): void
     {
-        if ($this->db->row('SELECT id FROM accounts WHERE group_id=? AND id=? AND enabled=1', [$actor->groupId, $account]) === null) {
+        if ($this->db->row('SELECT id FROM accounts WHERE group_id=? AND id=? AND enabled=1 FOR UPDATE', [$actor->groupId, $account]) === null) {
             throw new BusinessError(404, 'account_not_found');
         }
     }

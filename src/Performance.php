@@ -51,6 +51,7 @@ final class Performance
                 throw new BusinessError(422, 'performance_scope_date_outside_cycle');
             }
             $worker = $this->workforce->lockEmployment($actor, $company, $employment, $day);
+            $this->workforce->requireNewWorkAllowed($actor, $company, $employment);
             $identity = $this->db->row(
                 "SELECT e.employee_code, e.display_name, e.account_id, a.id AS assignment_id, r.manager_account_id
                  FROM employees e JOIN assignments a ON a.group_id=e.group_id AND a.employment_id=? AND a.company_id=?
@@ -114,8 +115,8 @@ final class Performance
     {
         $scope = [$actor->groupId, $company, $cycle];
         $participant = $this->participant([...$scope, $id]);
-        $role = $this->viewRole($actor, $company, $participant);
         $period = $this->cycle($scope);
+        $role = $this->viewRole($actor, $company, $participant, $period['state'] === 'finalized');
         $revisions = $this->db->rows(
             'SELECT revision, kind, score, goal_scores, feedback, rationale, decision_ref, recorded_by, recorded_at
              FROM performance_revisions WHERE group_id=? AND company_id=? AND cycle_id=? AND participant_id=? ORDER BY revision',
@@ -311,16 +312,26 @@ final class Performance
                 $grants[] = 'p.' . $role . '_account_id=?';
             }
         }
+        if (!in_array('employee', $roles, true) && $actor->archiveGranted($company)) {
+            $grants[] = "EXISTS (SELECT 1 FROM archived_employment_access x JOIN performance_cycles f
+                            ON f.group_id=p.group_id AND f.company_id=p.company_id AND f.id=p.cycle_id AND f.state='finalized'
+                            WHERE x.group_id=p.group_id AND x.company_id=p.company_id AND x.employment_id=p.employment_id
+                              AND x.account_id=p.employee_account_id AND x.account_id=?)";
+        }
         if ($grants === []) {
             throw new BusinessError(404, 'company_not_found');
         }
         return [' AND (' . implode(' OR ', $grants) . ')', array_fill(0, count($grants), $actor->accountId)];
     }
 
-    private function viewRole(Access $actor, int $company, array $participant): string
+    private function viewRole(Access $actor, int $company, array $participant, bool $finalized): string
     {
         if (in_array('hr', $actor->roles($company), true)) {
             return 'hr';
+        }
+        if ($finalized && (int) $participant['employee_account_id'] === $actor->accountId
+            && $actor->archiveGranted($company, (int) $participant['employment_id'])) {
+            return 'employee';
         }
         return $this->requireParticipantActor($actor, $company, $participant, ['employee', 'manager']);
     }

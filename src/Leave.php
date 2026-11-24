@@ -59,6 +59,7 @@ final class Leave
         ], function () use ($actor, $company, $employment, $kind, $day, $minutes, $reason, $decision): array {
             $this->workforce->lockEmployment($actor, $company, $employment, $day);
             $this->requester($actor, $company, $employment, $day);
+            $this->workforce->requireNewWorkAllowed($actor, $company, $employment);
             $scope = [$actor->groupId, $company, $employment];
             $balance = $this->balance($scope, $kind, (int) substr($day, 0, 4));
             $available = $balance['granted_minutes'] - $balance['reserved_minutes'] - $balance['used_minutes'];

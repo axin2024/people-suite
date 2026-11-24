@@ -22,6 +22,7 @@ class Session:
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
         )
         self.csrf = None
+        self.account_id = None
 
     def call(self, path, body=None, *, key=None, status=200, invalid_csrf=False):
         headers = {"Accept": "application/json"}
@@ -45,6 +46,8 @@ class Session:
             assert response.code in expected, (path, response.code, payload)
         if "csrf_token" in payload:
             self.csrf = payload["csrf_token"]
+        if path == "/api/login" and "account_id" in payload:
+            self.account_id = payload["account_id"]
         return payload
 
     def download(self, path, filename):
@@ -595,6 +598,145 @@ def employee_services(admin, company, employment, payroll_actors, manager, sourc
     return issued_path, certificate
 
 
+def publish_exit_payroll(admin, maker, reviewer, company, employment_path, rule, month, next_month, expected_shifts, expected_gross):
+    cert = admin.call(employment_path + "/attendance-certifications", {
+        "starts_on": month, "ends_before": next_month, "expected_shifts": expected_shifts,
+        "decision_ref": f"EXIT-CERT-{month}", "notes": "Attendance reconciled for this payroll period",
+    }, key=f"certify-{month}", status=201)
+    payroll = company + "/payroll"
+    run = maker.call(payroll + "/runs", {"period_start": month}, key=f"run-{month}", status=201)
+    path = f"{payroll}/runs/{run['run_id']}"
+    trial = maker.call(path + "/trial", {"version": run["version"], "rule_id": rule, "attendance_watermark": cert["watermark"]}, key=f"trial-{month}")
+    assert trial["gross_minor"] == expected_gross and trial["blocked_count"] == 0
+    base = {"version": trial["version"], "decision_ref": f"SUBMIT-{month}", "notes": "Commit final payroll evidence"}
+    submitted = maker.call(path + "/submit", base, key=f"submit-{month}")
+    closed = reviewer.call(path + "/close", {**base, "version": submitted["version"], "decision_ref": f"CLOSE-{month}"}, key=f"close-{month}")
+    reviewer.call(path + "/publish", {**base, "version": closed["version"], "decision_ref": f"PUBLISH-{month}"}, key=f"publish-{month}")
+    assert reviewer.call(path + "/verify-closure")["valid"]
+    payslip, = reviewer.call(path)["payslips"]
+    return path, payslip["id"]
+
+
+def departure(admin, origin, credentials, company, worker, employment, source_company):
+    old_id, old_manager = create_login(admin, origin, company, credentials, "handover-former-manager", "manager")
+    new_id, manager = create_login(admin, origin, company, credentials, "handover-current-manager", "manager")
+    _, maker = create_login(admin, origin, company, credentials, "handover-payroll-maker", "payroll_maker")
+    _, reviewer = create_login(admin, origin, company, credentials, "handover-payroll-reviewer", "payroll_reviewer")
+    _, outsider = create_login(admin, origin, company, credentials, "handover-other-worker", "employee")
+    for role in ("employee", "payroll_maker"):
+        admin.call(company + "/roles", {"account_id": worker.account_id, "role": role})
+
+    path = f"{company}/employments/{employment}"
+    admin.call(path + "/manager", {"account_id": old_id, "effective_from": "2026-04-25"}, key="former-reporting")
+    admin.call(path + "/manager", {"account_id": new_id, "effective_from": "2026-05-10"}, key="current-reporting")
+    shift_dates = ("2026-05-04", "2026-05-12", "2026-05-22")
+    shift_paths = []
+    for index, day in enumerate(shift_dates):
+        roster = {"workday": day, "starts_at": f"{day}T09:00:00+08:00", "ends_at": f"{day}T17:00:00+08:00"}
+        scheduled = admin.call(path + "/shifts", roster, key=f"exit-shift-{index}", status=201)
+        shift_paths.append(f"{company}/attendance/shifts/{scheduled['shift_id']}")
+        if index < 2:
+            for action, timestamp in (("in", roster["starts_at"]), ("out", roster["ends_at"])):
+                admin.call(shift_paths[-1] + "/punches", {"source": "EXIT-ACCESS", "event_ref": f"SHIFT-{index}-{action}", "direction": action,
+                                                          "punched_at": timestamp}, key=f"exit-{index}-{action}")
+            revision = admin.call(shift_paths[-1])["attendance"]["version"]
+            admin.call(shift_paths[-1] + "/resolution", {"version": revision, "state": "worked", "decision_ref": f"EXIT-WORKED-{index}",
+                                                        "explanation": "Clock records match scheduled hours"}, key=f"exit-worked-{index}")
+
+    payroll = company + "/payroll"
+    rule = maker.call(payroll + "/rules", {"rule_ref": "EXIT-RULE", "title": "Final payroll", "proration_basis": "actual_days"}, key="exit-rule", status=201)["rule_id"]
+    april, old_slip = publish_exit_payroll(admin, maker, reviewer, company, path, rule, "2026-04-01", "2026-05-01", 0, 186000)
+    old_slip_path = f"{payroll}/my-payslips/{old_slip}"
+    inquiry_path = old_slip_path + "/inquiries"
+    inquiry = {"reference": "EXIT-APRIL-CHECK", "category": "base_pay", "question": "Check the joining date used for April pay."}
+    question = worker.call(inquiry_path, inquiry, key="ask-exit-salary", status=201)
+    employee_path = company + "/employee/requests"
+    leave = {"kind": "ANNUAL", "workday": "2026-05-13", "minutes": 480, "reference": "EXIT-LEAVE", "reason": "Appointment"}
+    admin.call(path + "/leave/grants", {"kind": "ANNUAL", "year": 2026, "minutes": 480, "decision_ref": "EXIT-LEAVE-GRANT"}, key="exit-leave-grant")
+    leave_id = worker.call(path + "/leave", leave, key="exit-leave", status=201)["leave_id"]
+    cert = {"employment_id": employment, "kind": "employment_certificate", "reference": "EXIT-SERVICE-PROOF", "details": "Request a copy of employment dates"}
+    request = worker.call(employee_path, cert, key="exit-service-proof", status=201)
+    cert_path = f"{employee_path}/{request['request_id']}"
+    cases = company + "/offboarding"
+    start = {"employment_id": employment, "assignment_version": 1, "ends_before": "2026-05-16", "reference": "EXIT-CASE-1",
+             "reason": "Voluntary departure", "equipment": [{"code": "LAPTOP-06", "label": "Work laptop 06"}]}
+    paused = admin.call(cases, {**start, "reference": "EXIT-CASE-CANCEL"}, key="start-cancelled-case", status=201)
+    cancelled = admin.call(f"{cases}/{paused['case_id']}/cancel", {"version": 1, "decision_ref": "EXIT-CANCELLED"}, key="cancel-provisional")
+    assert cancelled["state"] == "cancelled"
+    case = admin.call(cases, start, key="start-exit", status=201)
+    assert admin.call(cases, start, key="start-exit", status=201) == case
+    active = f"{cases}/{case['case_id']}"
+    outsider.call(active, status=404)
+    old_manager.call(active, status=404)
+    assert [task["code"] for task in manager.call(active)["tasks"]] == ["HANDOVER"]
+    assert [task["code"] for task in reviewer.call(active)["tasks"]] == ["PAYROLL"]
+    assert len(worker.call(active)["tasks"]) == 5 and "reason" not in worker.call(active)["case"]
+    assert {item["kind"] for item in admin.call(active)["blockers"]} == {"task", "employee_request", "leave", "shift", "payslip_inquiry"}
+    for url, body, key in (
+        (employee_path, {**cert, "reference": "FROZEN-CASE"}, "frozen-request"),
+        (path + "/leave", {**leave, "reference": "FROZEN-LEAVE"}, "frozen-leave"),
+        (inquiry_path, {**inquiry, "reference": "FROZEN-INQUIRY"}, "frozen-inquiry"),
+    ):
+        assert worker.call(url, body, key=key, status=409)["error"] == "offboarding_new_work_frozen"
+    schedule = {"workday": "2026-05-23", "starts_at": "2026-05-23T09:00:00+08:00", "ends_at": "2026-05-23T17:00:00+08:00"}
+    assert admin.call(path + "/shifts", schedule, key="frozen-schedule", status=409)["error"] == "offboarding_new_work_frozen"
+    assert admin.call(company + "/roles", {"account_id": worker.account_id, "role": "manager"}, status=409)["error"] == "offboarding_role_grants_locked"
+    admin.call(cert_path + "/approve", {"version": 1, "decision_ref": "EXIT-CERT-APPROVED", "response": "Employment date record supplied"}, key="approve-exit-proof")
+    worker.call(f"{path}/leave/{leave_id}/cancel", {"version": 1, "decision_ref": "EXIT-LEAVE-WITHDRAWN"}, key="withdraw-exit-leave")
+    admin.call(shift_paths[-1] + "/resolution", {"version": 1, "state": "cancelled", "decision_ref": "EXIT-SHIFT-DROPPED",
+                                                  "explanation": "Employment ends before this shift"}, key="cancel-future-shift")
+    question_path = f"{payroll}/inquiries/{question['inquiry_id']}"
+    answered = reviewer.call(question_path + "/answer", {"version": 1, "decision_ref": "EXIT-APRIL-ANSWER", "answer": "April covers April 25 to 30."}, key="exit-payroll-answer")
+    worker.call(question_path + "/acknowledge", {"version": answered["version"]}, key="ack-exit-salary")
+
+    version = case["version"]
+    for code, person in (("HANDOVER", manager), ("ACCESS", admin), ("EQUIPMENT", admin), ("PAYROLL", reviewer)):
+        decision = {"version": version, "decision_ref": f"EXIT-{code}", "evidence": "Checklist evidence verified"}
+        result = person.call(f"{active}/tasks/{code}/confirm", decision, key=f"exit-task-{code}")
+        assert person.call(f"{active}/tasks/{code}/confirm", decision, key=f"exit-task-{code}") == result
+        version = result["version"]
+    completion = {"version": version, "decision_ref": "EXIT-COMPLETE"}
+    blocked = admin.call(active + "/complete", completion, key="complete-exit", status=409)
+    assert blocked["error"] == "offboarding_clearance_incomplete"
+    assert blocked["details"]["blockers"] == [{"kind": "task", "code": "LAPTOP-06", "label": "Work laptop 06", "owner_role": "hr"}]
+    assert admin.call(path + "?on=2026-05-16")["effective_from"] == "2026-04-25"
+    device = {"version": version, "decision_ref": "EXIT-LAPTOP-06", "evidence": "Registered device was returned"}
+    manager.call(active + "/tasks/LAPTOP-06/confirm", device, key="forbidden-asset", status=404)
+    cleared = admin.call(active + "/tasks/LAPTOP-06/confirm", device, key="returned-laptop")
+    completion["version"] = cleared["version"]
+    finished = admin.call(active + "/complete", completion, key="complete-exit")
+    assert finished["state"] == "completed" and finished["revoked_role_count"] == 2
+    assert admin.call(active + "/complete", completion, key="complete-exit") == finished
+    assert admin.call(path)["employment"]["ends_before"] == "2026-05-16"
+    admin.call(path + "?on=2026-05-16", status=404)
+    assert old_manager.call(shift_paths[0])["shift"]["workday"] == shift_dates[0]
+    old_manager.call(shift_paths[1], status=404)
+    old_manager.call(shift_paths[2], status=404)
+    assert manager.call(shift_paths[1])["shift"]["workday"] == shift_dates[1]
+    manager.call(shift_paths[2], status=404)
+
+    assert worker.call(active)["case"]["state"] == "completed"
+    assert worker.call(cert_path)["outcome"]["starts_on"] == "2026-04-25"
+    assert len(worker.call(company + "/employee/requests")["requests"]) == 1
+    assert worker.call(inquiry_path)["inquiries"][0]["state"] == "acknowledged"
+    assert {item["id"] for item in worker.call("/api/companies")["companies"]} == {int(company.rsplit("/", 1)[1]), int(source_company.rsplit("/", 1)[1])}
+    worker.call(april, status=404)
+    worker.call(employee_path, cert, key="after-exit-request", status=404)
+    worker.call(inquiry_path, inquiry, key="after-exit-inquiry", status=404)
+    outsider.call(old_slip_path + ".csv", status=404)
+    assert admin.call(company + "/roles", {"account_id": worker.account_id, "role": "employee"}, status=409)["error"] == "offboarding_role_grants_locked"
+
+    _, final_slip = publish_exit_payroll(admin, maker, reviewer, company, path, rule, "2026-05-01", "2026-06-01", 2, 450000)
+    historical = worker.call(payroll + "/my-payslips")["payslips"]
+    assert [item["payable_minor"] for item in historical] == [186000, 450000]
+    final_path = f"{payroll}/my-payslips/{final_slip}"
+    last, = worker.call(final_path)["segments"]
+    assert last["ends_before"] == "2026-05-16" and last["facts"]["days"] == 15
+    assert worker.download(final_path + ".csv", f"payslip-{final_slip}.csv")[0]["payable_minor"] == "450000"
+    outsider.call(final_path + ".csv", status=404)
+    assert len(worker.call(source_company + "/payroll/my-payslips")["payslips"]) == 2
+
+
 def run(origin, group):
     password = "Fixture-hcm-pass-99"
     admin = Session(origin)
@@ -762,10 +904,11 @@ def run(origin, group):
     group_costs = "/api/payroll/department-costs?period_start=2026-04-01"
     assert receiving.call(group_costs)["companies"] == []
     receiving.call(original_payroll[4] + "/department-costs", status=404)
+    departure(admin, origin, credentials, target, employee_session, received["employment_id"], company)
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll, CSV, performance and employee service flows passed.")
+    print("HTTP recruitment, employment, attendance, leave, payroll, performance, offboarding and archived payslip flows passed.")
 
 
 if __name__ == "__main__":

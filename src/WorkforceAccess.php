@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace PeopleSuite;
 
+use DateTimeImmutable;
+use DateTimeZone;
+
 final class WorkforceAccess
 {
     public function __construct(private readonly Database $db, private readonly Operations $operations)
@@ -23,6 +26,7 @@ final class WorkforceAccess
                 $actor->groupId, $record['employee_id'],
             ]);
             $this->lockEmployment($actor, $company, $employment);
+            $this->requireNewWorkAllowed($actor, $company, $employment);
             $role = $this->db->row(
                 "SELECT a.id FROM company_roles r JOIN accounts a ON a.group_id=r.group_id AND a.id=r.account_id
                  WHERE r.group_id=? AND r.company_id=? AND r.account_id=? AND r.role='employee' AND a.enabled=1",
@@ -53,6 +57,7 @@ final class WorkforceAccess
             'employment_id' => $employment, 'manager_account_id' => $manager, 'effective_from' => $start,
         ], function () use ($actor, $company, $employment, $manager, $start): array {
             $employmentRow = $this->lockEmployment($actor, $company, $employment, $start);
+            $this->requireNewWorkAllowed($actor, $company, $employment, $start);
             $scope = [$actor->groupId, $company, $employment];
             $role = $this->db->row(
                 "SELECT r.account_id FROM company_roles r
@@ -138,5 +143,23 @@ final class WorkforceAccess
         return $this->db->row('SELECT 1 FROM employees WHERE group_id=? AND id=? AND account_id=?', [
             $group, $employee, $account,
         ]) !== null;
+    }
+
+    public function companyToday(Access $actor, int $company): string
+    {
+        $row = $this->db->row('SELECT timezone FROM companies WHERE group_id=? AND id=?', [$actor->groupId, $company])
+            ?? throw new BusinessError(404, 'company_not_found');
+        return (new DateTimeImmutable('today', new DateTimeZone($row['timezone'])))->format('Y-m-d');
+    }
+
+    public function requireNewWorkAllowed(Access $actor, int $company, int $employment, ?string $scheduledOn = null): void
+    {
+        $active = $this->db->row(
+            "SELECT id, ends_before FROM offboarding_cases WHERE group_id=? AND company_id=? AND employment_id=? AND state='in_progress'",
+            [$actor->groupId, $company, $employment],
+        );
+        if ($active !== null && ($scheduledOn === null || $scheduledOn >= $active['ends_before'])) {
+            throw new BusinessError(409, 'offboarding_new_work_frozen', ['case_id' => (int) $active['id'], 'ends_before' => $active['ends_before']]);
+        }
     }
 }

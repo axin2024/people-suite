@@ -13,12 +13,14 @@ final class PayrollInquiries
         private readonly Database $db,
         private readonly Operations $operations,
         private readonly Payroll $payroll,
+        private readonly WorkforceAccess $workforce,
     ) {
     }
 
     public function open(Access $actor, int $company, int $payslip, string $key, array $input): array
     {
-        $this->payroll->publishedSummary($actor, $company, $payslip);
+        $actor->company($company, 'employee');
+        $employment = (int) $this->payroll->publishedSummary($actor, $company, $payslip)['employment_id'];
         $reference = Input::code($input['reference'] ?? null, 'reference');
         $category = $input['category'] ?? null;
         if (!in_array($category, ['base_pay', 'attendance', 'withholding', 'adjustment', 'other'], true)) {
@@ -27,8 +29,10 @@ final class PayrollInquiries
         $question = Input::text($input['question'] ?? null, 'question', 1200);
         return $this->operations->once($actor, $company, 'payroll.inquiry_opened', $key, [
             'payslip_id' => $payslip, 'reference' => $reference, 'category' => $category, 'question' => $question,
-        ], function () use ($actor, $company, $payslip, $reference, $category, $question): array {
+        ], function () use ($actor, $company, $payslip, $employment, $reference, $category, $question): array {
             $scope = [$actor->groupId, $company];
+            $this->workforce->lockEmployment($actor, $company, $employment);
+            $actor->company($company, 'employee');
             $this->db->row('SELECT id FROM payslips WHERE group_id=? AND company_id=? AND id=? FOR UPDATE', [...$scope, $payslip]);
             $previous = $this->db->row(
                 'SELECT id, category, question FROM payslip_inquiries
@@ -41,6 +45,7 @@ final class PayrollInquiries
                 }
                 return self::openedReceipt((int) $previous['id'], $payslip, $reference);
             }
+            $this->workforce->requireNewWorkAllowed($actor, $company, $employment);
             $id = $this->db->insert(
                 'INSERT INTO payslip_inquiries (group_id, company_id, payslip_id, opened_by, reference, category, question)
                  VALUES (?, ?, ?, ?, ?, ?, ?)',

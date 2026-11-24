@@ -149,14 +149,9 @@ final class Payroll
         $scope = [$actor->groupId, $company];
         $run = $this->run($scope, $id);
         if ((int) $run['trial_revision'] === 0) {
-            return ['run' => $run, 'trial' => null, 'payslips' => []];
+            return ['run' => $run, 'trial' => null, 'payslips' => [], 'review_events' => [], 'closure' => null];
         }
-        $trial = $this->db->row(
-            'SELECT id, revision, rule_id, attendance_watermark, calculated_by, eligible_count, blocked_count,
-                    gross_minor, net_minor, cost_minor, calculated_at
-             FROM payroll_trials WHERE group_id=? AND company_id=? AND run_id=? AND revision=?',
-            [...$scope, $id, $run['trial_revision']],
-        );
+        $trial = $this->currentTrial($scope, $run);
         $payslips = $this->db->rows(
             'SELECT id, employment_id, employee_code, employee_name, state, gross_minor, absence_minor, withholding_minor,
                     net_minor, cost_minor, facts
@@ -167,12 +162,138 @@ final class Payroll
             $payslip['facts'] = json_decode($payslip['facts'], true, flags: JSON_THROW_ON_ERROR);
         }
         unset($payslip);
-        return ['run' => $run, 'trial' => $trial, 'payslips' => $payslips];
+        $reviews = $this->db->rows(
+            'SELECT trial_id, resulting_version, actor_id, action, decision_ref, notes, recorded_at
+             FROM payroll_review_events WHERE group_id=? AND company_id=? AND run_id=? ORDER BY resulting_version',
+            [...$scope, $id],
+        );
+        return ['run' => $run, 'trial' => $trial, 'payslips' => $payslips, 'review_events' => $reviews,
+            'closure' => $this->closure($scope, $id)];
+    }
+
+    public function review(Access $actor, int $company, int $id, string $action, string $key, array $input): array
+    {
+        $needed = match ($action) {
+            'submit' => 'calculated',
+            'return', 'close' => 'in_review',
+            'publish' => 'closed',
+            default => throw new BusinessError(404, 'operation_not_found'),
+        };
+        $actor->company($company, $action === 'submit' ? 'payroll_maker' : 'payroll_reviewer');
+        $version = Input::integer($input['version'] ?? null, 'version');
+        $decision = Input::code($input['decision_ref'] ?? null, 'decision_ref');
+        $notes = Input::text($input['notes'] ?? null, 'notes', 600);
+        return $this->operations->once($actor, $company, 'payroll.' . $action, $key, [
+            'run_id' => $id, 'version' => $version, 'decision_ref' => $decision, 'notes' => $notes,
+        ], function () use ($actor, $company, $id, $action, $needed, $version, $decision, $notes): array {
+            $scope = [$actor->groupId, $company];
+            $run = $this->run($scope, $id, true);
+            if ((int) $run['version'] !== $version || $run['state'] !== $needed) {
+                throw new BusinessError(409, 'payroll_run_conflict', ['version' => (int) $run['version'], 'state' => $run['state']]);
+            }
+            $trial = $this->currentTrial($scope, $run);
+            $preparedByActor = (int) $trial['calculated_by'] === $actor->accountId;
+            if ($action === 'submit' && !$preparedByActor) {
+                throw new BusinessError(403, 'payroll_trial_maker_required');
+            }
+            if ($action !== 'submit' && $preparedByActor) {
+                throw new BusinessError(403, 'payroll_reviewer_must_differ');
+            }
+            if ($action === 'submit' && ((int) $trial['blocked_count'] > 0 || (int) $trial['eligible_count'] === 0)) {
+                throw new BusinessError(409, 'payroll_trial_blocked', [
+                    'blocked_count' => (int) $trial['blocked_count'], 'eligible_count' => (int) $trial['eligible_count'],
+                ]);
+            }
+
+            $next = match ($action) {
+                'submit' => 'in_review',
+                'return' => 'calculated',
+                'close' => 'closed',
+                'publish' => 'published',
+            };
+            $digest = null;
+            if ($action === 'close' || $action === 'publish') {
+                $digest = $this->snapshotDigest($scope, $run, $trial);
+                if ($action === 'close') {
+                    $this->db->run(
+                        'INSERT INTO payroll_closures (group_id, company_id, run_id, trial_id, closed_by, digest)
+                         VALUES (?, ?, ?, ?, ?, ?)',
+                        [...$scope, $id, $trial['id'], $actor->accountId, $digest],
+                    );
+                } else {
+                    $closure = $this->closure($scope, $id);
+                    if ($closure === null || (int) $closure['trial_id'] !== (int) $trial['id'] || !hash_equals($closure['digest'], $digest)) {
+                        throw new BusinessError(409, 'payroll_closure_mismatch');
+                    }
+                }
+            }
+            $this->db->run(
+                'INSERT INTO payroll_review_events (
+                    group_id, company_id, run_id, trial_id, resulting_version, actor_id, action, decision_ref, notes
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [...$scope, $id, $trial['id'], $version + 1, $actor->accountId, $action, $decision, $notes],
+            );
+            $this->db->run('UPDATE payroll_runs SET state=?, version=version+1 WHERE id=?', [$next, $id]);
+            $this->operations->audit($actor, $company, 'payroll_run', $id, 'payroll.' . $action, [
+                'trial_id' => (int) $trial['id'], 'decision_ref' => $decision, 'version' => $version + 1, 'digest' => $digest,
+            ]);
+            return [
+                'run_id' => $id, 'trial_id' => (int) $trial['id'], 'version' => $version + 1, 'state' => $next,
+                'decision_ref' => $decision, 'digest' => $digest,
+            ];
+        });
+    }
+
+    public function verifyClosure(Access $actor, int $company, int $id): array
+    {
+        $actor->company($company, 'payroll_maker', 'payroll_reviewer');
+        $scope = [$actor->groupId, $company];
+        $run = $this->run($scope, $id);
+        $closed = $this->closure($scope, $id) ?? throw new BusinessError(404, 'payroll_closure_not_found');
+        $trial = $this->currentTrial($scope, $run);
+        $digest = $this->snapshotDigest($scope, $run, $trial);
+        return ['run_id' => $id, 'digest' => $closed['digest'],
+            'valid' => (int) $closed['trial_id'] === (int) $trial['id'] && hash_equals($closed['digest'], $digest)];
+    }
+
+    public function myPayslips(Access $actor, int $company, int $after): array
+    {
+        $actor->company($company, 'employee');
+        return $this->db->rows(
+            'SELECT p.id, r.period_start, r.period_end, p.gross_minor, p.absence_minor, p.withholding_minor, p.net_minor, c.digest
+             FROM payslips p JOIN employments w ON w.group_id=p.group_id AND w.company_id=p.company_id AND w.id=p.employment_id
+             JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
+             JOIN payroll_closures c ON c.group_id=p.group_id AND c.company_id=p.company_id AND c.trial_id=p.trial_id
+             JOIN payroll_runs r ON r.group_id=c.group_id AND r.company_id=c.company_id AND r.id=c.run_id
+             WHERE p.group_id=? AND p.company_id=? AND e.account_id=? AND p.id>?
+               AND r.state=? ORDER BY p.id LIMIT 100',
+            [$actor->groupId, $company, $actor->accountId, $after, 'published'],
+        );
+    }
+
+    public function myPayslip(Access $actor, int $company, int $id): array
+    {
+        $actor->company($company, 'employee');
+        $summary = $this->db->row(
+            'SELECT r.period_start, r.period_end, c.digest
+             FROM payslips p JOIN employments w ON w.group_id=p.group_id AND w.company_id=p.company_id AND w.id=p.employment_id
+             JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
+             JOIN payroll_closures c ON c.group_id=p.group_id AND c.company_id=p.company_id AND c.trial_id=p.trial_id
+             JOIN payroll_runs r ON r.group_id=c.group_id AND r.company_id=c.company_id AND r.id=c.run_id
+             WHERE p.group_id=? AND p.company_id=? AND e.account_id=? AND p.id=? AND r.state=?',
+            [$actor->groupId, $company, $actor->accountId, $id, 'published'],
+        ) ?? throw new BusinessError(404, 'payslip_not_found');
+        return [...$summary, ...$this->storedPayslip($actor, $company, $id)];
     }
 
     public function payslip(Access $actor, int $company, int $id): array
     {
         $actor->company($company, 'payroll_maker', 'payroll_reviewer');
+        return $this->storedPayslip($actor, $company, $id);
+    }
+
+    private function storedPayslip(Access $actor, int $company, int $id): array
+    {
         $scope = [$actor->groupId, $company, $id];
         $record = $this->db->row(
             'SELECT id, trial_id, employment_id, attendance_certification_id, employee_code, employee_name, state,
@@ -191,6 +312,54 @@ final class Payroll
         }
         unset($segment);
         return ['payslip' => $record, 'segments' => $segments];
+    }
+
+    private function currentTrial(array $scope, array $run): array
+    {
+        return $this->db->row(
+            'SELECT id, revision, rule_id, attendance_watermark, calculated_by, eligible_count, blocked_count,
+                    gross_minor, net_minor, cost_minor, calculated_at
+             FROM payroll_trials WHERE group_id=? AND company_id=? AND run_id=? AND revision=?',
+            [...$scope, $run['id'], $run['trial_revision']],
+        ) ?? throw new BusinessError(409, 'payroll_trial_missing');
+    }
+
+    private function closure(array $scope, int $run): ?array
+    {
+        return $this->db->row(
+            'SELECT trial_id, closed_by, digest, closed_at FROM payroll_closures WHERE group_id=? AND company_id=? AND run_id=?',
+            [...$scope, $run],
+        );
+    }
+
+    private function snapshotDigest(array $scope, array $run, array $trial): string
+    {
+        $hash = hash_init('sha256');
+        $rule = $this->rule($scope, (int) $trial['rule_id']);
+        hash_update($hash, json_encode([
+            'payroll-closure-v1', $scope, $run['id'], $run['period_start'], $run['period_end'], $trial, $rule,
+        ], JSON_THROW_ON_ERROR) . "\n");
+        $parameters = [...$scope, $trial['id']];
+        $payslips = $this->db->rows(
+            'SELECT id, employment_id, attendance_certification_id, employee_code, employee_name, state,
+                    gross_minor, absence_minor, withholding_minor, net_minor, cost_minor, facts
+             FROM payslips WHERE group_id=? AND company_id=? AND trial_id=? ORDER BY id',
+            $parameters,
+        );
+        foreach ($payslips as $payslip) {
+            hash_update($hash, json_encode($payslip, JSON_THROW_ON_ERROR) . "\n");
+        }
+        $segments = $this->db->rows(
+            'SELECT s.payslip_id, s.line_no, s.department_id, s.starts_on, s.ends_before, s.base_minor, s.allowance_minor,
+                    s.absence_minor, s.cost_minor, s.facts
+             FROM payslip_segments s JOIN payslips p ON p.group_id=s.group_id AND p.company_id=s.company_id AND p.id=s.payslip_id
+             WHERE p.group_id=? AND p.company_id=? AND p.trial_id=? ORDER BY s.payslip_id, s.line_no',
+            $parameters,
+        );
+        foreach ($segments as $segment) {
+            hash_update($hash, json_encode($segment, JSON_THROW_ON_ERROR) . "\n");
+        }
+        return hash_final($hash);
     }
 
     private function run(array $scope, int $id, bool $lock = false): array

@@ -169,7 +169,7 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
 
 def payroll_trial(admin, origin, credentials, company, employment, department_id, finance, actors):
     manager, employee, imported_shift = actors
-    _, maker = create_login(admin, origin, company, credentials, "payroll-maker", "payroll_maker")
+    maker_id, maker = create_login(admin, origin, company, credentials, "payroll-maker", "payroll_maker")
     _, reviewer = create_login(admin, origin, company, credentials, "payroll-reviewer", "payroll_reviewer")
     payroll = company + "/payroll"
     rule_input = {"rule_ref": "BASE-30", "title": "30 day demo", "proration_basis": "fixed_30"}
@@ -186,6 +186,8 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     missing = reviewer.call(run_path)["payslips"][0]
     assert first["blocked_count"] == 1 and missing["facts"]["blocking_reason"] == "attendance_certificate_missing"
     assert missing["net_minor"] is None
+    blocked_submission = {"version": first["version"], "decision_ref": "SUBMIT-1", "notes": "Review fixture"}
+    assert maker.call(run_path + "/submit", blocked_submission, key="submit-blocked", status=409)["error"] == "payroll_trial_blocked"
 
     certification = {
         "starts_on": "2026-04-01", "ends_before": "2026-05-01", "expected_shifts": 2,
@@ -224,9 +226,56 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
         key="late-schedule", status=201,
     )
     stale_input = {**trial, "version": second["version"], "attendance_watermark": stale_shift["watermark"]}
-    assert maker.call(run_path + "/trial", stale_input, key="stale-cert-trial")["blocked_count"] == 1
+    third = maker.call(run_path + "/trial", stale_input, key="stale-cert-trial")
+    assert third["blocked_count"] == 1
     assert reviewer.call(run_path)["payslips"][0]["facts"]["blocking_reason"] == "attendance_certificate_stale"
     assert reviewer.call(payslip_path) == detail
+
+    admin.call(
+        f"{company}/attendance/shifts/{stale_shift['shift_id']}/resolution",
+        {"version": 1, "state": "cancelled", "decision_ref": "REMOVE-ERRONEOUS-SHIFT", "explanation": "Duplicate roster source"},
+        key="cancel-roster-row",
+    )
+    renewed = admin.call(certify_path, {**certification, "decision_ref": "APRIL-ATTENDANCE-2"}, key="recert", status=201)
+    fourth = maker.call(
+        run_path + "/trial", {**trial, "version": third["version"], "attendance_watermark": renewed["watermark"]},
+        key="closing-trial",
+    )
+    assert fourth["gross_minor"] == 900000 and fourth["blocked_count"] == 0
+    assert employee.call(payroll + "/my-payslips")["payslips"] == []
+    author = {"version": fourth["version"], "decision_ref": "SUBMIT-2", "notes": "Confirm inputs"}
+    reviewer.call(run_path + "/submit", author, key="reviewer-submit", status=404)
+    submitted = maker.call(run_path + "/submit", author, key="submit")
+    admin.call(company + "/roles", {"account_id": maker_id, "role": "payroll_reviewer"})
+    close = {"version": submitted["version"], "decision_ref": "CLOSE-1", "notes": "Checked against attendance and contract"}
+    assert maker.call(run_path + "/close", close, key="self-close", status=403)["error"] == "payroll_reviewer_must_differ"
+    returned = reviewer.call(
+        run_path + "/return", {**close, "decision_ref": "RETURN-1", "notes": "Check fixture reconciliation again"},
+        key="return",
+    )
+    assert returned["state"] == "calculated"
+    submitted = maker.call(run_path + "/submit", {**author, "version": returned["version"], "decision_ref": "SUBMIT-3"}, key="submit-again")
+    close = {**close, "version": submitted["version"]}
+    closed = reviewer.call(run_path + "/close", close, key="close")
+    assert closed["state"] == "closed" and len(closed["digest"]) == 64
+    assert reviewer.call(run_path + "/close", close, key="close") == closed
+    assert reviewer.call(run_path + "/verify-closure") == {"run_id": run["run_id"], "digest": closed["digest"], "valid": True}
+    assert employee.call(payroll + "/my-payslips")["payslips"] == []
+    assert maker.call(run_path + "/trial", {**trial, "version": closed["version"]}, key="retry-closed", status=409)["error"] == "payroll_run_conflict"
+
+    published = reviewer.call(
+        run_path + "/publish", {"version": closed["version"], "decision_ref": "PUBLISH-1", "notes": "Publish approved salary"},
+        key="publish",
+    )
+    assert published["state"] == "published" and published["digest"] == closed["digest"]
+    final = employee.call(payroll + "/my-payslips")["payslips"]
+    assert len(final) == 1 and final[0]["net_minor"] == 900000 and final[0]["digest"] == closed["digest"]
+    employee_view = f"{payroll}/my-payslips/{final[0]['id']}"
+    assert employee.call(employee_view)["payslip"]["net_minor"] == 900000
+    manager.call(employee_view, status=404)
+    _, other_employee = create_login(admin, origin, company, credentials, "other-employee", "employee")
+    assert other_employee.call(payroll + "/my-payslips")["payslips"] == []
+    other_employee.call(employee_view, status=404)
 
 
 def run(origin, group):
@@ -387,7 +436,7 @@ def run(origin, group):
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, attendance, leave, two-party legal transfer, and segmented payroll trials passed.")
+    print("HTTP recruitment, employment, attendance, leave, legal transfer, and separated payroll close and release passed.")
 
 
 if __name__ == "__main__":

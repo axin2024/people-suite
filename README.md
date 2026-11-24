@@ -32,6 +32,8 @@ php -S 127.0.0.1:8080 -t public public/index.php
 
 将服务指向同一独立测试库后，可用 Python 3 运行 `python tests/http_smoke.py http://127.0.0.1:8080`，从真实 HTTP 接口验证入职调岗、跨午夜考勤、请假、导入续跑和 9000 元两部门分摊。
 
+运行 `php -d memory_limit=256M tests/payroll_capacity.php 1000` 可复现一个法人 1,000 人的月度试算、封账与部门成本核对。参见[容量验收记录](docs/payroll-capacity.md)。
+
 ## 许可
 
 项目采用 [Apache License 2.0](LICENSE)。

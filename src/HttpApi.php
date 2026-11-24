@@ -21,6 +21,7 @@ final class HttpApi
     private readonly Leave $leave;
     private readonly Payroll $payroll;
     private readonly PayrollAdjustments $payrollAdjustments;
+    private readonly PayrollInquiries $payrollInquiries;
 
     public function __construct(private readonly Database $db)
     {
@@ -38,6 +39,7 @@ final class HttpApi
         $this->payroll = new Payroll(
             $db, $operations, $this->attendance, $this->attendanceCertifications, new PayrollCalculator(), $this->payrollAdjustments,
         );
+        $this->payrollInquiries = new PayrollInquiries($db, $operations, $this->payroll);
     }
 
     public function handle(string $method, string $path): array
@@ -216,6 +218,28 @@ final class HttpApi
         }
         if ($method === 'GET' && preg_match('#^payroll/my-payslips/([0-9]{1,19})$#D', $resource, $match)) {
             return [200, $this->payroll->myPayslip($actor, $company, Input::integer($match[1], 'payslip_id'))];
+        }
+        if (preg_match('#^payroll/my-payslips/([0-9]{1,19})/inquiries$#D', $resource, $match)) {
+            $payslip = Input::integer($match[1], 'payslip_id');
+            return match ($method) {
+                'GET' => [200, ['inquiries' => $this->payrollInquiries->forEmployee(
+                    $actor, $company, $payslip, Input::integer($_GET['after'] ?? 0, 'after', 0),
+                )]],
+                'POST' => [201, $this->payrollInquiries->open($actor, $company, $payslip, $this->requestKey(), $input)],
+                default => throw new BusinessError(404, 'route_not_found'),
+            };
+        }
+        if ($method === 'GET' && $resource === 'payroll/inquiries') {
+            return [200, ['inquiries' => $this->payrollInquiries->reviewQueue(
+                $actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0), $_GET['state'] ?? null,
+            )]];
+        }
+        if ($method === 'POST' && preg_match('#^payroll/inquiries/([0-9]{1,19})/(answer|acknowledge)$#D', $resource, $match)) {
+            $inquiry = Input::integer($match[1], 'inquiry_id');
+            $key = $this->requestKey();
+            return [200, $match[2] === 'answer'
+                ? $this->payrollInquiries->answer($actor, $company, $inquiry, $key, $input)
+                : $this->payrollInquiries->acknowledge($actor, $company, $inquiry, $key, $input)];
         }
         if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments))?$#D', $resource, $match)) {
             throw new BusinessError(404, 'route_not_found');

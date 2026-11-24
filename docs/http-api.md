@@ -126,3 +126,15 @@
 `POST /runs/{id}/adjustments` 由制单人操作，目标是可编辑的后续账期。传 `original_payslip_id`、`original_line_no`、`decision_ref`、`corrected_monthly_minor`、`notes` 和幂等键。再次修订同一行时，传最新回执的 `previous_adjustment_id`。回执包含原行金额、前次重算、此次重算、原工资单总额及本次差额。同一历史行及决定编号重复提交会返回同一笔补差，字段变化会返回冲突。
 
 补差沿用原行的分摊天数、部门和扣缴规则。下一次试算纳入差额，原法人已经没有当期任职的员工会收到单独的补差单。工资单的 `net_minor` 保留当期正常净额，`payable_minor` 包含补差，`adjustments` 记录来源和金额。
+
+### 员工工资核对
+
+| 方法与后缀 | 请求字段与说明 |
+| --- | --- |
+| POST `/my-payslips/{id}/inquiries` | 员工对本人已发布工资单发起核对。传 `reference`、`category`、`question` 和幂等键。 |
+| GET `/my-payslips/{id}/inquiries` | 员工读取本人提出的疑问、答复和确认时间。支持 `?after=ID`。 |
+| GET `/inquiries` | 薪酬复核人读取本法人待办及历史结果。支持 `?state=open`、`answered`、`acknowledged` 和 `after=ID`。 |
+| POST `/inquiries/{id}/answer` | 由独立薪酬复核人答复，传 `version`、`decision_ref`、`answer` 和幂等键。 |
+| POST `/inquiries/{id}/acknowledge` | 本人确认收到答复，传 `version` 和幂等键。 |
+
+核对类别为 `base_pay`、`attendance`、`withholding`、`adjustment` 或 `other`。疑问和答复仅写入核对记录，已发布工资单及封账摘要可以独立回读。

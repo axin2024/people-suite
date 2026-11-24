@@ -346,6 +346,49 @@ def retro_trial(company, original, department_id):
     assert "recorded_by" not in line and "notes" not in line["facts"]
 
 
+def payslip_inquiries(company, original, manager, receiving, target):
+    _, reviewer, employee, other_employee, april_path, payslip_id, digest = original
+    payroll = company + "/payroll"
+    payslip = f"{payroll}/my-payslips/{payslip_id}"
+    path = payslip + "/inquiries"
+    before = employee.call(payslip)
+    question = {"reference": "APRIL-SPLIT", "category": "base_pay", "question": "Why does April show two lines?"}
+    assert employee.call(path)["inquiries"] == []
+    other_employee.call(path, question, key="other-question", status=404)
+    inquiry = employee.call(path, question, key="april-question", status=201)
+    assert employee.call(path, question, key="april-question", status=201) == inquiry
+    assert employee.call(path, question, key="april-question-retry", status=201) == inquiry
+    assert employee.call(path, {**question, "question": "Changed"}, key="conflicting-question", status=409)["error"] == "inquiry_reference_conflict"
+    assert inquiry["state"] == "open" and inquiry["version"] == 1
+    inquiry_path = f"{payroll}/inquiries/{inquiry['inquiry_id']}"
+    manager.call(payroll + "/inquiries", status=404)
+    assert receiving.call(target + "/payroll/inquiries")["inquiries"] == []
+    other_employee.call(path, status=404)
+    other_employee.call(inquiry_path + "/acknowledge", {"version": 1}, key="other-ack", status=404)
+    employee.call(inquiry_path + "/acknowledge", {"version": 1}, key="early-ack", status=409)
+    pending, = reviewer.call(payroll + "/inquiries?state=open")["inquiries"]
+    assert pending["id"] == inquiry["inquiry_id"] and pending["question"] == question["question"]
+    response = {"version": 1, "decision_ref": "APRIL-RECONCILED", "answer": "The appointment changed on April 16. Each department covers 15 days."}
+    foreign_path = target + f"/payroll/inquiries/{inquiry['inquiry_id']}/answer"
+    assert receiving.call(foreign_path, response, key="foreign-inquiry", status=404)["error"] == "payslip_inquiry_not_found"
+    manager.call(inquiry_path + "/answer", response, key="manager-answer", status=404)
+    answer = reviewer.call(inquiry_path + "/answer", response, key="review-answer")
+    assert reviewer.call(inquiry_path + "/answer", response, key="review-answer") == answer
+    assert reviewer.call(inquiry_path + "/answer", response, key="different-answer", status=409)["error"] == "payslip_inquiry_conflict"
+    detail, = employee.call(path)["inquiries"]
+    assert detail["answer"] == response["answer"] and detail["version"] == 2
+    assert "answered_by" not in detail
+    acknowledgement = {"version": answer["version"]}
+    closed = employee.call(inquiry_path + "/acknowledge", acknowledgement, key="acknowledged")
+    assert employee.call(inquiry_path + "/acknowledge", acknowledgement, key="acknowledged") == closed
+    assert closed["state"] == "acknowledged" and closed["version"] == 3
+    assert reviewer.call(payroll + "/inquiries?state=open")["inquiries"] == []
+    assert reviewer.call(payroll + "/inquiries?state=acknowledged")["inquiries"][0]["acknowledged_at"]
+    assert employee.call(payslip) == before
+    verified = reviewer.call(april_path + "/verify-closure")
+    assert verified["valid"] and verified["digest"] == digest
+
+
 def run(origin, group):
     password = "Fixture-hcm-pass-99"
     admin = Session(origin)
@@ -502,10 +545,12 @@ def run(origin, group):
     admin.call(employment_path + "?on=2026-04-25", status=404)
     assert admin.call(employment_path + "?on=2026-04-24")["department_id"] == finance
     retro_trial(company, original_payroll, department_id)
+    admin.call(target + "/roles", {"account_id": receiving_id, "role": "payroll_reviewer"})
+    payslip_inquiries(company, original_payroll, actors[0], receiving, target)
 
     recruiter.call("/api/logout", {})
     recruiter.call(app, status=401)
-    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll close, release and retroactive adjustment passed.")
+    print("HTTP recruitment, employment, attendance, leave, legal transfer, payroll close, release, adjustment and inquiries passed.")
 
 
 if __name__ == "__main__":

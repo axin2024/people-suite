@@ -282,8 +282,14 @@ final class Payroll
 
     public function myPayslip(Access $actor, int $company, int $id): array
     {
+        $summary = $this->publishedSummary($actor, $company, $id);
+        return [...$summary, ...$this->storedPayslip($actor, $company, $id, employeeView: true)];
+    }
+
+    public function publishedSummary(Access $actor, int $company, int $id): array
+    {
         $actor->company($company, 'employee');
-        $summary = $this->db->row(
+        return $this->db->row(
             'SELECT r.period_start, r.period_end, c.digest
              FROM payslips p JOIN employments w ON w.group_id=p.group_id AND w.company_id=p.company_id AND w.id=p.employment_id
              JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
@@ -292,7 +298,6 @@ final class Payroll
              WHERE p.group_id=? AND p.company_id=? AND e.account_id=? AND p.id=? AND r.state=?',
             [$actor->groupId, $company, $actor->accountId, $id, 'published'],
         ) ?? throw new BusinessError(404, 'payslip_not_found');
-        return [...$summary, ...$this->storedPayslip($actor, $company, $id, employeeView: true)];
     }
 
     public function payslip(Access $actor, int $company, int $id): array

@@ -121,6 +121,16 @@ final class AttendanceImports
         return ['import' => $import, 'counts' => $counts, 'rows' => $rows];
     }
 
+    public function batches(Access $actor, int $company, int $after): array
+    {
+        $actor->company($company, 'hr');
+        return $this->db->rows(
+            'SELECT id, kind, row_count, created_at FROM attendance_imports
+             WHERE group_id=? AND company_id=? AND owner_id=? AND id>? ORDER BY id LIMIT 100',
+            [$actor->groupId, $company, $actor->accountId, $after],
+        );
+    }
+
     private function owned(Access $actor, int $company, int $id): array
     {
         $actor->company($company, 'hr');

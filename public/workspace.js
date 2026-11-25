@@ -1,4 +1,5 @@
 import { attachment, badge, button, empty, facts, field, money, node, panel, reference, statuses, table, today } from "./workspace-ui.js";
+import { attendancePages } from "./attendance-workspace.js";
 import { employmentPages } from "./employment-workspace.js";
 import { payrollPages } from "./payroll-workspace.js";
 import { recruitmentPages } from "./recruitment-workspace.js";
@@ -57,6 +58,19 @@ const errors = {
     same_company: "请选择其他法人作为接收方。",
     legal_transfer_requires_receiver: "该申请需要由接收法人的另一位 HR 处理，或已接收。",
     duplicate_business_key: "此业务编号已被使用，请核对记录。",
+    invalid_instant: "日期时间须包含秒和时区偏移，例如 2026-04-15T22:00:00+08:00。",
+    shift_must_start_on_workday: "班次开始时间与所选工作日不一致。",
+    shift_overlap: "该员工已有时间重叠的班次。",
+    attendance_version_conflict: "班次已更新，请刷新并核对最新版本。",
+    attendance_anomaly_unresolved: "仍有未解决的打卡异常，暂时无法确认出勤。",
+    attendance_period_incomplete: "实排班次与预计数不一致，或仍有班次待核对。",
+    punch_event_conflict: "该设备的事件编号已有不同内容，请核对原始记录。",
+    invalid_attendance_batch_json: "导入行须为 JSON 数组。",
+    duplicate_attendance_import_row_ref: "一个批次内的行标识必须唯一。",
+    leave_balance_insufficient: "可用假期分钟不足。",
+    leave_state_conflict: "请假状态已更新，请刷新并核对。",
+    leave_self_approval: "请由另一位有权限的人员审批。",
+    approved_leave_cancellation_requires_review: "已批准的请假需由 HR 或直属主管销假。",
     invalid_csrf_token: "操作会话已过期，请刷新页面后重试。",
     login_required: "登录已失效，请重新登录。",
     inactive_session: "当前账号会话已失效，请重新登录。",
@@ -126,7 +140,8 @@ function operation(ctx, fields, buttons, submit, onSuccess, onError) {
             if (ctx.current()) await onSuccess(result, action);
         } catch (error) {
             if (ctx.current() && !sessionExpired(error)) {
-                feedback.textContent = error instanceof ApiError ? error.message : "操作未完成，请检查输入或连接后重试。";
+                feedback.textContent = error instanceof ApiError ? error.message
+                    : errors[error.code] || "操作未完成，请检查输入或连接后重试。";
                 feedback.hidden = false;
                 if (onError) onError(error);
             }
@@ -192,6 +207,7 @@ const pages = [
     { id: "profile", label: "我的档案", allow: (c) => c.archive || c.roles.includes("employee"), load: profile },
     { id: "payslips", label: "我的工资单", allow: (c) => c.archive || c.roles.includes("employee"), load: payslips },
     { id: "requests", label: "我的申请", allow: (c) => c.archive || c.roles.includes("employee"), load: requests },
+    ...attendancePages,
     { id: "administration", label: "集团设置", global: true, load: administration },
 ];
 

@@ -73,18 +73,21 @@
 | --- | --- |
 | POST `/employments/{id}/account` | 键。HR 传 `account_id`，将已有员工角色的账户与人员关联。 |
 | POST `/employments/{id}/manager` | 键。HR 传主管 `account_id` 和 `effective_from`，创建带生效区间的汇报关系。 |
+| GET `/attendance/workforce?workday=2026-04-15` | 列出该工作日内可查的任职、待核对班次和待审批请假数量。支持 `after=ID`。 |
 | GET `/employments/{id}/shifts?workday=2026-04-15` | 查指定工作日班表。 |
 | POST `/employments/{id}/shifts` | 键。传 `workday`、`starts_at`、`ends_at`。 |
-| GET `/attendance/shifts/{shift}` | 查班次、当前版本、异常类型和打卡引用。 |
+| GET `/attendance/shifts/{shift}` | 同一快照内读取班次、当前版本、异常类型与打卡时间和设备事件编号。 |
 | POST `/attendance/shifts/{shift}/punches` | 键。传 `source`、`event_ref`、`direction`（`in` 或 `out`）、`punched_at`。设备与事件的相同内容重放返回原回执。 |
 | POST `/attendance/shifts/{shift}/resolution` | 键。传 `version`、`state`（`worked`、`absent`、`excused` 或 `cancelled`）、`decision_ref`、`explanation`。HR 可传 `worked_minutes` 核定异常工时。 |
 | GET `/attendance/watermark` | HR 和薪酬角色可查当前法人考勤水位。 |
+| GET `/employments/{id}/attendance-certifications` | HR 查看该任职的确认日期、汇总分钟、水位和决定编号。支持 `after=ID`。 |
 | POST `/employments/{id}/attendance-certifications` | 键。HR 传 `starts_on`、`ends_before`、`expected_shifts`、`decision_ref` 和 `notes`。预期班次与排班一致且都已核对时，生成该任职的考勤确认。 |
 
 时间戳使用带时区的 RFC 3339 秒级字符串，例如 `2026-04-15T22:00:00+08:00`。工作日取班次开始时在法人时区的日期。班次可跨午夜，时长介于 1 分钟和 24 小时之间。回读时间戳以 Unix 秒表示。审批后补录打卡会新增异常版本，保留此前的版本和核对记录。
 
 ### 批量导入
 
+- `GET /attendance/imports` 查询当前 HR 创建的批次，支持 `after=ID`。批次及其行的读写均限创建者。
 - `POST /attendance/imports` 带请求键，提交 `kind`（`roster` 或 `punches`）和最多 100 个 `rows`。每行带唯一 `row_ref`，及对应班表或打卡字段。班表行带 `employment_id`，打卡行带 `shift_id`。
 - `POST /attendance/imports/{id}/run` 每次最多处理 25 行。可传 `limit`、`after_row` 和 `retry_failed`。断开后回到原批次继续，成功行保留初次回执。
 - `GET /attendance/imports/{id}` 返回待处理、成功、失败的数量，以及每行的尝试次数和结果。

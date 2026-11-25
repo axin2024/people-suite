@@ -483,8 +483,18 @@ final class HttpApi
 
     private function attendanceRoute(string $method, string $resource, Access $actor, int $company, array $input): array
     {
+        if ($method === 'GET' && $resource === 'attendance/workforce') {
+            return [200, ['workforce' => $this->workforce->attendanceDirectory(
+                $actor, $company, Input::date($_GET['workday'] ?? null, 'workday'), Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )]];
+        }
         if ($method === 'GET' && $resource === 'attendance/watermark') {
             return [200, ['watermark' => $this->attendance->watermark($actor, $company)]];
+        }
+        if ($method === 'GET' && $resource === 'attendance/imports') {
+            return [200, ['batches' => $this->attendanceImports->batches(
+                $actor, $company, Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )]];
         }
         if ($method === 'POST' && $resource === 'attendance/imports') {
             return [201, $this->attendanceImports->submit($actor, $company, $this->requestKey(), $input)];
@@ -524,6 +534,11 @@ final class HttpApi
         }
         if ($method === 'GET' && $resource === 'leave') {
             return [200, $this->leave->summary($actor, $company, $employment, Input::date($_GET['workday'] ?? null, 'workday'))];
+        }
+        if ($method === 'GET' && $resource === 'attendance-certifications') {
+            return [200, ['certifications' => $this->attendanceCertifications->history(
+                $actor, $company, $employment, Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )]];
         }
         if (preg_match('#^leave/([0-9]{1,19})(?:/(approve|deny|cancel))?$#D', $resource, $match)) {
             $leaveId = Input::integer($match[1], 'leave_id');

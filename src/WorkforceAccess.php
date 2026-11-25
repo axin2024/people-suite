@@ -123,6 +123,46 @@ final class WorkforceAccess
         throw new BusinessError(404, 'employment_not_found');
     }
 
+    public function attendanceDirectory(Access $actor, int $company, string $day, int $after): array
+    {
+        $actor->company($company, 'hr', 'manager', 'employee');
+        $roles = $actor->roles($company);
+        return $this->db->rows(
+            "WITH scoped AS (
+                SELECT w.id, w.group_id, w.company_id, e.employee_code, e.display_name, e.account_id=? AS is_self,
+                       CASE
+                           WHEN ?=1 THEN 'hr'
+                           WHEN ?=1 AND EXISTS (
+                               SELECT 1 FROM reporting_lines r
+                               WHERE r.group_id=w.group_id AND r.company_id=w.company_id AND r.employment_id=w.id
+                                   AND r.manager_account_id=? AND r.effective_from<=?
+                                   AND (r.effective_until IS NULL OR r.effective_until>?)
+                           ) THEN 'manager'
+                           WHEN ?=1 AND e.account_id=? THEN 'employee'
+                       END AS access_role
+                FROM employments w JOIN employees e ON e.group_id=w.group_id AND e.id=w.employee_id
+                WHERE w.group_id=? AND w.company_id=? AND w.id>? AND w.starts_on<=?
+                    AND (w.ends_before IS NULL OR w.ends_before>?)
+             ), page AS (
+                SELECT * FROM scoped WHERE access_role IS NOT NULL ORDER BY id LIMIT 100
+             )
+             SELECT p.id, p.employee_code, p.display_name, COALESCE(p.is_self,0) AS is_self, p.access_role,
+                    (SELECT COUNT(*) FROM leave_requests l WHERE l.group_id=p.group_id AND l.company_id=p.company_id
+                       AND l.employment_id=p.id AND l.workday=? AND l.state='pending') AS pending_leave,
+                    (SELECT COUNT(*) FROM shifts s
+                       WHERE s.group_id=p.group_id AND s.company_id=p.company_id AND s.employment_id=p.id AND s.workday=?
+                       AND (SELECT v.state FROM attendance_versions v WHERE v.group_id=s.group_id
+                            AND v.company_id=s.company_id AND v.shift_id=s.id ORDER BY v.version DESC LIMIT 1)
+                           IN ('anomaly','ready','scheduled')) AS open_shifts
+             FROM page p ORDER BY p.id",
+            [
+                $actor->accountId, (int) in_array('hr', $roles, true), (int) in_array('manager', $roles, true),
+                $actor->accountId, $day, $day, (int) in_array('employee', $roles, true), $actor->accountId,
+                $actor->groupId, $company, $after, $day, $day, $day, $day,
+            ],
+        );
+    }
+
     public function lockEmployment(Access $actor, int $company, int $id, ?string $day = null): array
     {
         $row = $this->db->row(

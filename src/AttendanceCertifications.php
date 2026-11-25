@@ -90,6 +90,20 @@ final class AttendanceCertifications
         });
     }
 
+    public function history(Access $actor, int $company, int $employment, int $after): array
+    {
+        $actor->company($company, 'hr');
+        $scope = [$actor->groupId, $company, $employment];
+        if ($this->db->row('SELECT 1 FROM employments WHERE group_id=? AND company_id=? AND id=?', $scope) === null) {
+            throw new BusinessError(404, 'employment_not_found');
+        }
+        return $this->db->rows(
+            'SELECT id, starts_on, ends_before, expected_shifts, worked_minutes, absent_minutes, watermark, decision_ref, certified_at
+             FROM attendance_certifications WHERE group_id=? AND company_id=? AND employment_id=? AND id>? ORDER BY id LIMIT 100',
+            [...$scope, $after],
+        );
+    }
+
     public function forPayroll(
         int $group,
         int $company,

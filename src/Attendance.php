@@ -199,11 +199,18 @@ final class Attendance
 
     public function detail(Access $actor, int $company, int $id): array
     {
-        $shift = $this->shift($actor, $company, $id);
-        $this->workforce->visibility($actor, $company, (int) $shift['employment_id'], $shift['workday'], true);
-        $version = $this->version($actor, $company, $id);
-        $version['evidence'] = json_decode($version['evidence'], true, flags: JSON_THROW_ON_ERROR);
-        return ['shift' => $shift, 'attendance' => $version];
+        return $this->db->transaction(function () use ($actor, $company, $id): array {
+            $shift = $this->shift($actor, $company, $id);
+            $this->workforce->visibility($actor, $company, (int) $shift['employment_id'], $shift['workday'], true);
+            $version = $this->version($actor, $company, $id);
+            $version['evidence'] = json_decode($version['evidence'], true, flags: JSON_THROW_ON_ERROR);
+            $punches = $this->db->rows(
+                'SELECT id, source, event_ref, direction, punched_at FROM punch_events
+                 WHERE group_id=? AND company_id=? AND shift_id=? ORDER BY punched_at, id',
+                [$actor->groupId, $company, $id],
+            );
+            return ['shift' => $shift, 'attendance' => $version, 'punches' => $punches];
+        }, repeatableRead: true);
     }
 
     public function watermark(Access $actor, int $company): int

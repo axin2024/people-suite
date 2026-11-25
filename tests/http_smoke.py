@@ -81,6 +81,14 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     admin.call(
         employment + "/manager", {"account_id": manager_id, "effective_from": "2026-04-01"}, key="manager-link",
     )
+    workforce = company + "/attendance/workforce?workday=2026-04-15"
+    employment_id = int(employment.rsplit("/", 1)[1])
+    for session, role, is_self in [(admin, "hr", 0), (manager, "manager", 0), (employee, "employee", 1)]:
+        people = session.call(workforce)["workforce"]
+        assert [(row["id"], row["access_role"], row["is_self"]) for row in people] == [(employment_id, role, is_self)]
+        assert session.call(workforce + f"&after={employment_id}")["workforce"] == []
+    assert outsider.call(workforce)["workforce"] == []
+    assert manager.call(company + "/attendance/workforce?workday=2026-03-31")["workforce"] == []
     night = {
         "workday": "2026-04-15", "starts_at": "2026-04-15T22:00:00+08:00", "ends_at": "2026-04-16T06:00:00+08:00",
     }
@@ -98,8 +106,11 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     first = admin.call(path + "/punches", in_punch, key="first-in")
     assert admin.call(path + "/punches", {**in_punch, "punched_at": "2026-04-15T14:00:00Z"}, key="retry-in") == first
     assert admin.call(path + "/punches", {**in_punch, "direction": "out"}, key="mutated-in", status=409)["error"] == "punch_event_conflict"
-    missing_out = manager.call(path)["attendance"]
+    missing = manager.call(path)
+    missing_out = missing["attendance"]
     assert missing_out["state"] == "anomaly" and missing_out["evidence"]["anomalies"] == ["missing_out"]
+    assert [(p["event_ref"], p["direction"]) for p in missing["punches"]] == [("SHIFT-IN", "in")]
+    assert manager.call(workforce)["workforce"][0]["open_shifts"] == 1
     unresolved = {"state": "worked", "version": missing_out["version"], "decision_ref": "WORKED-01", "explanation": "Normal shift"}
     assert manager.call(path + "/resolution", unresolved, key="resolve-night", status=409)["error"] == "attendance_anomaly_unresolved"
     admin.call(path + "/punches", out_punch, key="first-out")
@@ -110,6 +121,7 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     assert admin.call(company + "/attendance/watermark")["watermark"] == approved["watermark"]
     assert len(manager.call(roster + "?workday=2026-04-15")["shifts"]) == 1
     assert manager.call(roster + "?workday=2026-04-16")["shifts"] == []
+    assert manager.call(workforce)["workforce"][0]["open_shifts"] == 0
 
     imports = company + "/attendance/imports"
     roster_import = {
@@ -123,6 +135,12 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     import_id = admin.call(imports, roster_import, key="roster-import", status=201)["import_id"]
     assert admin.call(imports, roster_import, key="roster-import", status=201)["import_id"] == import_id
     import_path = f"{imports}/{import_id}"
+    assert [row["id"] for row in admin.call(imports)["batches"]] == [import_id]
+    assert admin.call(imports + f"?after={import_id}")["batches"] == []
+    manager.call(imports, status=404)
+    _, other_hr = create_login(admin, origin, company, credentials, "other-hr", "hr")
+    assert other_hr.call(imports)["batches"] == []
+    other_hr.call(import_path, status=404)
     assert admin.call(import_path)["counts"] == {"pending": 2, "succeeded": 0, "failed": 0}
     assert admin.call(import_path + "/run", {"limit": 1})["counts"] == {"pending": 1, "succeeded": 1, "failed": 0}
     resumed = admin.call(import_path + "/run", {})
@@ -163,6 +181,8 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     pending, failure = sorted(results, key=lambda result: "error" in result)
     assert pending["state"] == "pending" and failure["error"] == "leave_balance_insufficient"
     request = f"{leave}/{pending['leave_id']}"
+    pending_people = manager.call(company + f"/attendance/workforce?workday={pending['workday']}")["workforce"]
+    assert pending_people[0]["pending_leave"] == 1
     assert employee.call(leave + "?workday=2026-04-20")["balances"][0]["available_minutes"] == 0
     outsider.call(request, status=404)
     employee.call(request + "/approve", {"version": 1, "decision_ref": "NO-SELF"}, key="self-approve", status=404)
@@ -214,6 +234,8 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
         "decision_ref": "APRIL-ATTENDANCE", "notes": "Roster and cutoff checked against fixture calendar",
     }
     certify_path = employment + "/attendance-certifications"
+    assert admin.call(certify_path)["certifications"] == []
+    manager.call(certify_path, status=404)
     incomplete = admin.call(certify_path, certification, key="cert", status=409)
     assert incomplete["error"] == "attendance_period_incomplete" and incomplete["details"]["blocking_count"] == 1
     shift_path = f"{company}/attendance/shifts/{imported_shift}"
@@ -225,6 +247,11 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     )
     certified = admin.call(certify_path, certification, key="cert", status=201)
     assert certified["worked_minutes"] == 960
+    history = admin.call(certify_path)["certifications"]
+    assert [(row["id"], row["decision_ref"], row["watermark"]) for row in history] == [
+        (certified["certification_id"], "APRIL-ATTENDANCE", certified["watermark"]),
+    ]
+    assert admin.call(certify_path + f"?after={certified['certification_id']}")["certifications"] == []
     second_input = {**trial, "version": first["version"], "attendance_watermark": certified["watermark"]}
     second = maker.call(run_path + "/trial", second_input, key="valid-trial")
     assert maker.call(run_path + "/trial", second_input, key="valid-trial") == second
@@ -789,6 +816,8 @@ def run(origin, group):
     with urllib.request.urlopen(origin + "/recruitment-workspace.js", timeout=10) as script:
         assert script.headers.get_content_type() == "text/javascript"
     with urllib.request.urlopen(origin + "/employment-workspace.js", timeout=10) as script:
+        assert script.headers.get_content_type() == "text/javascript"
+    with urllib.request.urlopen(origin + "/attendance-workspace.js", timeout=10) as script:
         assert script.headers.get_content_type() == "text/javascript"
     assert not admin.call("/api/session")["authenticated"]
     admin.call("/api/workspace", status=401)

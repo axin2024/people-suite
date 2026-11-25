@@ -20,6 +20,7 @@ $workspaceFiles = [
     '/' => ['workspace.html', 'text/html'],
     '/workspace.js' => ['workspace.js', 'text/javascript'],
     '/workspace-ui.js' => ['workspace-ui.js', 'text/javascript'],
+    '/attendance-workspace.js' => ['attendance-workspace.js', 'text/javascript'],
     '/employment-workspace.js' => ['employment-workspace.js', 'text/javascript'],
     '/payroll-workspace.js' => ['payroll-workspace.js', 'text/javascript'],
     '/recruitment-workspace.js' => ['recruitment-workspace.js', 'text/javascript'],

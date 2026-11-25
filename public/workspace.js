@@ -2,6 +2,7 @@ import { attachment, badge, button, empty, facts, field, money, node, panel, ref
 import { attendancePages } from "./attendance-workspace.js";
 import { employmentPages } from "./employment-workspace.js";
 import { payrollPages } from "./payroll-workspace.js";
+import { performancePages } from "./performance-workspace.js";
 import { recruitmentPages } from "./recruitment-workspace.js";
 
 const $ = (id) => document.getElementById(id);
@@ -71,6 +72,22 @@ const errors = {
     leave_state_conflict: "请假状态已更新，请刷新并核对。",
     leave_self_approval: "请由另一位有权限的人员审批。",
     approved_leave_cancellation_requires_review: "已批准的请假需由 HR 或直属主管销假。",
+    invalid_performance_period: "绩效周期截止日须晚于开始日。",
+    performance_scope_date_outside_cycle: "绩效归属日须在周期内。",
+    performance_requires_employee_and_manager: "该日任职需有关联员工账号和有效直属主管。",
+    performance_cycle_incomplete: "当前阶段仍有待办或尚未加入参加人。",
+    performance_cycle_conflict: "周期版本已更新，请刷新核对阶段。",
+    performance_cycle_phase_conflict: "当前绩效阶段已变化，请刷新页面。",
+    performance_participant_conflict: "绩效记录已更新，请刷新后再编辑。",
+    performance_goals_already_confirmed: "目标已确认，当前无法编辑。",
+    performance_goals_required: "请先登记至少一项目标。",
+    invalid_performance_goal_list: "请输入 1 至 12 项绩效目标。",
+    duplicate_performance_goal: "每项目标代码应唯一。",
+    performance_goal_weights_must_total_10000: "绩效目标权重合计须为 10000。",
+    performance_goal_scores_must_match: "主管评分须覆盖已确认的全部目标。",
+    performance_evaluation_already_submitted: "主管评分已提交，员工自评已冻结。",
+    performance_independent_calibrator_required: "此记录需要由与参加人及评分人不同的 HR 处理。",
+    performance_revision_conflict: "已登记本阶段评价，请刷新核对修订记录。",
     invalid_csrf_token: "操作会话已过期，请刷新页面后重试。",
     login_required: "登录已失效，请重新登录。",
     inactive_session: "当前账号会话已失效，请重新登录。",
@@ -208,6 +225,7 @@ const pages = [
     { id: "payslips", label: "我的工资单", allow: (c) => c.archive || c.roles.includes("employee"), load: payslips },
     { id: "requests", label: "我的申请", allow: (c) => c.archive || c.roles.includes("employee"), load: requests },
     ...attendancePages,
+    ...performancePages,
     { id: "administration", label: "集团设置", global: true, load: administration },
 ];
 

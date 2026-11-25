@@ -187,7 +187,7 @@
 | GET `/{cycle}` | 查询周期及授权参加人，支持 `after=ID`。 |
 | POST `/{cycle}/participants` | 键。HR 传 `employment_id`、`scope_on`，录入期间内有任职、员工账号和主管的参加人。 |
 | POST `/{cycle}/advance` | 键。HR 传周期 `version`、`decision_ref`，推进下一阶段。当前阶段仍有待办时返回数量。 |
-| GET `/{cycle}/participants/{id}` | 查询个人目标、自评与可见的评价修订。员工定稿后看到已发布结果和反馈。 |
+| GET `/{cycle}/participants/{id}` | 查询个人目标、自评、可见的评价修订和当前用户可执行的 `actions`。员工定稿后看到已发布结果和反馈。 |
 | POST `/{cycle}/participants/{id}/goals` | 键。本人或直属主管传参加人 `version`、`goals`。每项目标包含 `code`、`title`、`target`、`weight_bps`，总权重为 10000。 |
 | POST `/{cycle}/participants/{id}/confirm-goals` | 键。直属主管传 `version`、`decision_ref` 确认并冻结目标。 |
 | POST `/{cycle}/participants/{id}/self-assessment` | 键。员工在主管提交评价前传 `version`、`assessment`。 |

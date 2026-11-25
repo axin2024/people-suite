@@ -115,6 +115,11 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .pagination { padding-top: 1rem; }
 .date-picker { align-items: end; }
 .panel-actions { margin-top: 1rem; }
+.performance-goal { min-width: 0; margin: 0 0 .65rem; padding: .8rem; border: 1px solid var(--line); border-radius: .5rem; }
+.performance-goal legend { padding-inline: .35rem; color: var(--muted); }
+.goal-fields { display: grid; gap: .75rem; align-items: end; }
+.goal-fields button { justify-self: start; }
+.detail-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @media (max-width: 760px) {
     .workspace { grid-template-columns: 1fr; }

@@ -510,6 +510,9 @@ def performance_cycle(admin, origin, company, credentials, employment_path, payr
     person = f"{path}/participants/{enrolled['participant_id']}"
     other_employee.call(person, status=404)
     successor.call(person, status=404)
+    assert employee.call(person)["actions"] == ["goals"]
+    assert manager.call(person)["actions"] == ["goals"]
+    assert admin.call(person)["actions"] == []
     goals = [
         {"code": "SERVICE", "title": "Service quality", "target": "Acknowledge 95% of work orders in the SLA", "weight_bps": 6000},
         {"code": "TRAINING", "title": "Skills transfer", "target": "Complete two training sessions", "weight_bps": 4000},
@@ -523,12 +526,16 @@ def performance_cycle(admin, origin, company, credentials, employment_path, payr
     saved = employee.call(person + "/goals", goals_update, key="employee-goals")
     assert employee.call(person + "/goals", goals_update, key="employee-goals") == saved
     assert manager.call(person)["participant"]["goals"] == goals
+    assert manager.call(person)["actions"] == ["goals", "confirm-goals"]
     assert manager.call(person + "/goals", goals_update, key="stale-goals", status=409)["error"] == "performance_participant_conflict"
     confirmed = manager.call(person + "/confirm-goals", {"version": saved["version"], "decision_ref": "APRIL-CONFIRM-GOALS"}, key="confirm-goals")
     locked = employee.call(person + "/goals", {**goals_update, "version": confirmed["version"]}, key="locked-goals", status=409)
     assert locked["error"] == "performance_goals_already_confirmed"
+    assert employee.call(person)["actions"] == manager.call(person)["actions"] == []
     evaluating = admin.call(path + "/advance", phase, key="begin-evaluation")
     assert evaluating["state"] == "evaluation"
+    assert employee.call(person)["actions"] == ["self-assessment"]
+    assert manager.call(person)["actions"] == ["evaluation"]
     self_evaluation = {"version": confirmed["version"], "assessment": "Completed both training sessions and logged work-order evidence."}
     reflected = employee.call(person + "/self-assessment", self_evaluation, key="self-evaluation")
     assert manager.call(person)["participant"]["self_assessment"] == self_evaluation["assessment"]
@@ -545,10 +552,13 @@ def performance_cycle(admin, origin, company, credentials, employment_path, payr
     assert manager.call(person + "/evaluation", evaluation, key="manager-score", status=201) == submitted
     assert employee.call(person)["revisions"] == []
     assert manager.call(person)["revisions"][0]["goal_scores"] == evaluation["goal_scores"]
+    assert employee.call(person)["actions"] == manager.call(person)["actions"] == []
     assert employee.call(person + "/self-assessment", {**self_evaluation, "version": submitted["version"]}, key="review-already-sent", status=409)["error"] == "performance_evaluation_already_submitted"
 
     calibrating = admin.call(path + "/advance", {"version": evaluating["version"], "decision_ref": "APRIL-BEGIN-CALIBRATION"}, key="begin-calibration")
     assert calibrating["state"] == "calibration"
+    assert admin.call(person)["actions"] == ["calibration"]
+    assert manager.call(person)["actions"] == []
     close = {"version": calibrating["version"], "decision_ref": "APRIL-RELEASE-RATINGS"}
     assert admin.call(path + "/advance", close, key="unresolved-calibrations", status=409)["details"]["pending"] == 1
     decision = {"version": submitted["version"], "decision_ref": "APRIL-CALIBRATED", "score": 88,
@@ -556,9 +566,12 @@ def performance_cycle(admin, origin, company, credentials, employment_path, payr
     manager.call(person + "/calibration", decision, key="manager-cannot-calibrate", status=404)
     calibrated = admin.call(person + "/calibration", decision, key="calibrate", status=201)
     assert calibrated["revision"] == 2 and admin.call(person)["revisions"][1]["rationale"] == decision["rationale"]
+    assert admin.call(person)["actions"] == []
     assert len(manager.call(person)["revisions"]) == 1 and employee.call(person)["revisions"] == []
     locked_cycle = admin.call(path + "/advance", close, key="release-ratings")
     assert locked_cycle["state"] == "finalized" and employee.call(path)["cycle"]["finalized_at"]
+    assert admin.call(person)["actions"] == ["amendment"]
+    assert employee.call(person)["actions"] == manager.call(person)["actions"] == []
     published, = employee.call(person)["revisions"]
     assert published["score"] == 88 and published["feedback"] == decision["feedback"]
     assert "rationale" not in published and "recorded_by" not in published
@@ -818,6 +831,8 @@ def run(origin, group):
     with urllib.request.urlopen(origin + "/employment-workspace.js", timeout=10) as script:
         assert script.headers.get_content_type() == "text/javascript"
     with urllib.request.urlopen(origin + "/attendance-workspace.js", timeout=10) as script:
+        assert script.headers.get_content_type() == "text/javascript"
+    with urllib.request.urlopen(origin + "/performance-workspace.js", timeout=10) as script:
         assert script.headers.get_content_type() == "text/javascript"
     assert not admin.call("/api/session")["authenticated"]
     admin.call("/api/workspace", status=401)

@@ -113,6 +113,11 @@ final class Performance
 
     public function view(Access $actor, int $company, int $cycle, int $id): array
     {
+        return $this->db->transaction(fn (): array => $this->participantView($actor, $company, $cycle, $id), repeatableRead: true);
+    }
+
+    private function participantView(Access $actor, int $company, int $cycle, int $id): array
+    {
         $scope = [$actor->groupId, $company, $cycle];
         $participant = $this->participant([...$scope, $id]);
         $period = $this->cycle($scope);
@@ -136,8 +141,30 @@ final class Performance
             }
             $visible[] = $revision;
         }
+        $actions = $this->participantActions($actor, $company, $period['state'], $participant);
         unset($participant['employee_account_id'], $participant['manager_account_id'], $participant['latest_revision']);
-        return ['cycle' => $period, 'participant' => $participant, 'revisions' => $visible];
+        return ['cycle' => $period, 'participant' => $participant, 'revisions' => $visible, 'actions' => $actions];
+    }
+
+    private function participantActions(Access $actor, int $company, string $phase, array $participant): array
+    {
+        $roles = $actor->roles($company);
+        $isEmployee = $actor->accountId === (int) $participant['employee_account_id'];
+        $isManager = $actor->accountId === (int) $participant['manager_account_id'];
+        $employee = $isEmployee && in_array('employee', $roles, true);
+        $manager = $isManager && in_array('manager', $roles, true);
+        $independentHr = !$isEmployee && !$isManager && in_array('hr', $roles, true);
+        $revision = (int) $participant['latest_revision'];
+        if ($phase === 'goals' && $participant['goal_confirmed_at'] === null && ($employee || $manager)) {
+            return $manager && $participant['goals'] !== [] ? ['goals', 'confirm-goals'] : ['goals'];
+        }
+        if ($phase === 'evaluation' && $revision === 0) {
+            return array_keys(array_filter(['self-assessment' => $employee, 'evaluation' => $manager]));
+        }
+        if ($phase === 'calibration' && $revision === 1 && $independentHr) {
+            return ['calibration'];
+        }
+        return $phase === 'finalized' && $independentHr ? ['amendment'] : [];
     }
 
     public function advance(Access $actor, int $company, int $cycle, string $key, array $input): array

@@ -1,0 +1,79 @@
+name: MySQL and workbench
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      COMPOSE_FILE: compose.yaml:storage/compose-ci.yml
+      HCM_DB_NAME: hcm_test_integration
+      HCM_DB_USER: people_suite
+      HCM_DB_PASSWORD: ci-app-only-local
+      HCM_MYSQL_ROOT_PASSWORD: ci-root-only-local
+      HCM_DSN: mysql:host=127.0.0.1;port=33126;dbname=hcm_test_integration;charset=utf8mb4
+      HCM_COOKIE_SECURE: "0"
+      HCM_HTTP_PORT: "8088"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: mbstring, pdo_mysql
+          coverage: none
+      - name: Boot Apache from a clean MySQL volume
+        run: |
+          mkdir -p storage
+          cat > storage/compose-ci.yml <<'YAML'
+          services:
+            db:
+              ports:
+                - "127.0.0.1:33126:3306"
+          YAML
+          docker compose up --build --wait --wait-timeout 180
+          curl --fail --silent http://127.0.0.1:8088/healthz | grep -Fx '{"ready":true}'
+          curl --fail --silent http://127.0.0.1:8088/ | grep -F '登录人力资源工作台'
+          docker compose exec -T web php bin/hcm.php health
+      - name: Verify HTTP, database transactions and payroll capacity
+        run: |
+          python3 tests/http_smoke.py http://127.0.0.1:8088
+          php tests/recruitment.php
+          php -d memory_limit=256M tests/payroll_capacity.php 1000
+      - name: Verify a public demo on empty and restored databases
+        run: |
+          docker compose exec -T db sh -ec 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mysql -uroot' <<'SQL'
+          CREATE DATABASE hcm_demo_ci CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+          CREATE DATABASE hcm_demo_ci_restore CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+          GRANT ALL PRIVILEGES ON hcm_demo_ci.* TO 'people_suite'@'%';
+          GRANT ALL PRIVILEGES ON hcm_demo_ci_restore.* TO 'people_suite'@'%';
+          SQL
+
+          export HCM_DSN='mysql:host=127.0.0.1;port=33126;dbname=hcm_demo_ci;charset=utf8mb4'
+          php bin/hcm.php migrate
+          demo() { printf '%s\n' 'ci-demo-only-local' | php bin/hcm.php "$1"; }
+          demo demo-seed
+          demo demo-finish > storage/initial.json
+          demo demo-finish > storage/replayed.json
+          demo demo-check > storage/readback.json
+          cmp storage/initial.json storage/replayed.json
+          cmp storage/initial.json storage/readback.json
+
+          docker compose exec -T db sh -ec 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mysqldump -uroot --single-transaction --no-tablespaces --set-gtid-purged=OFF --default-character-set=utf8mb4 hcm_demo_ci' > storage/demo-backup.sql
+          docker compose exec -T db sh -ec 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mysql -uroot --default-character-set=utf8mb4 hcm_demo_ci_restore' < storage/demo-backup.sql
+          export HCM_DSN='mysql:host=127.0.0.1;port=33126;dbname=hcm_demo_ci_restore;charset=utf8mb4'
+          php bin/hcm.php health
+          demo demo-check > storage/restored.json
+          cmp storage/initial.json storage/restored.json
+          cat storage/restored.json
+      - name: Read service logs on failure
+        if: failure()
+        run: docker compose logs --no-color

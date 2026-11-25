@@ -1,0 +1,14 @@
+**
+!bin/
+!bin/**
+!database/
+!database/**
+!deploy/
+!deploy/apache-site.conf
+!deploy/php.ini
+!public/
+!public/**
+!src/
+!src/**
+!LICENSE
+!NOTICE

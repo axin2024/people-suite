@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 import csv
+import http.client
 import http.cookiejar
 import io
 import json
@@ -11,15 +12,18 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 
 class Session:
     def __init__(self, origin):
         self.origin = origin
+        self.cookies = http.cookiejar.CookieJar()
         self.client = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            urllib.request.HTTPCookieProcessor(self.cookies)
         )
         self.csrf = None
         self.account_id = None
@@ -50,6 +54,21 @@ class Session:
             self.account_id = payload["account_id"]
         return payload
 
+    def post_without_reading_response(self, path, body, key):
+        data = json.dumps(body).encode("utf-8")
+        url = self.origin + path
+        request = urllib.request.Request(url, data, {
+            "Content-Type": "application/json", "X-CSRF-Token": self.csrf, "Idempotency-Key": key,
+        })
+        self.cookies.add_cookie_header(request)
+        target = urlsplit(url)
+        connection = http.client.HTTPSConnection if target.scheme == "https" else http.client.HTTPConnection
+        client = connection(target.hostname, target.port, timeout=10)
+        try:
+            client.request("POST", target.path, data, dict(request.header_items()))
+        finally:
+            client.close()
+
     def download(self, path, filename):
         request = urllib.request.Request(self.origin + path, headers={"Accept": "text/csv"})
         with self.client.open(request, timeout=10) as response:
@@ -71,6 +90,42 @@ def create_login(admin, origin, company, credentials, name, role):
     actor.call("/api/session")
     actor.call("/api/login", {**credentials, "email": email})
     return account, actor
+
+
+PHP = ["php", "-d", "extension=pdo_mysql"] if sys.platform == "win32" else ["php"]
+
+
+def create_group(group, password):
+    subprocess.run(
+        [*PHP, "bin/hcm.php", "create-group", group, "HTTP Fixture", "http-admin@example.test", "Admin"],
+        input=(password + "\n").encode(),
+        check=True,
+    )
+
+
+def verify_group_isolation(origin, credentials, original_company, run_path, payslip_id):
+    tenant = credentials["group"] + "-isolated"
+    create_group(tenant, credentials["password"])
+    outsider = Session(origin)
+    outsider.call("/api/session")
+    login = outsider.call("/api/login", {**credentials, "group": tenant})
+    company_id = outsider.call(
+        "/api/companies", {"code": "CN", "name": "Isolated Harbor", "timezone": "Asia/Shanghai", "currency": "CNY"},
+        status=201,
+    )["company_id"]
+    own = f"/api/companies/{company_id}"
+    for role in ["payroll_reviewer", "employee"]:
+        outsider.call(own + "/roles", {"account_id": login["account_id"], "role": role})
+    assert outsider.call(own + "/payroll/my-payslips")["payslips"] == []
+    outsider.call(run_path, status=404)
+    outsider.call(run_path + "/department-costs.csv", status=404)
+    document = original_company + f"/payroll/my-payslips/{payslip_id}"
+    outsider.call(document, status=404)
+    outsider.call(document + ".csv", status=404)
+    costs = "/api/payroll/department-costs"
+    date = "?period_start=2026-04-01"
+    assert outsider.call(costs + date)["companies"] == []
+    assert outsider.download(costs + ".csv" + date, "department-costs.csv") == []
 
 
 def attendance_and_leave(admin, origin, credentials, company, employment):
@@ -378,8 +433,14 @@ def retro_trial(company, original, department_id):
     adjustment_path = may_path + "/adjustments"
     reviewer.call(adjustment_path, adjustment, key="reviewer-retro", status=404)
     maker.call(adjustment_path, {**adjustment, "original_line_no": 3}, key="wrong-line", status=404)
+    maker.post_without_reading_response(adjustment_path, adjustment, "may-retro")
+    for _ in range(20):
+        persisted = reviewer.call(adjustment_path)["adjustments"]
+        if persisted:
+            break
+        time.sleep(0.1)
+    saved, = persisted
     change = maker.call(adjustment_path, adjustment, key="may-retro", status=201)
-    saved, = reviewer.call(adjustment_path)["adjustments"]
     assert saved["id"] == change["id"] and saved["gross_delta_minor"] == 30000 and saved["notes"] == adjustment["notes"]
     assert reviewer.call(adjustment_path + f"?after={change['id']}")["adjustments"] == []
     assert change == maker.call(adjustment_path, adjustment, key="may-retro", status=201)
@@ -798,7 +859,7 @@ def verify_export_audit(group_id, archived_download):
             [(int) $argv[1], 'payroll.%_exported']
         ), JSON_THROW_ON_ERROR);
     """
-    exports = json.loads(subprocess.check_output([*php, "-r", query, str(group_id)]))
+    exports = json.loads(subprocess.check_output([*PHP, "-r", query, str(group_id)]))
     for event in exports:
         event["facts"] = json.loads(event["facts"])
     routes = {(event["action"], event["facts"]["view"]) for event in exports}
@@ -923,6 +984,14 @@ def run(origin, group):
     employment_path = f"{company}/employments/{employee['employment_id']}"
     recruiter.call(employment_path, status=404)
     assert admin.call(employment_path)["contracts"][0]["reference"] == "C-001"
+    revision, = admin.call(position + "/revisions")["revisions"]
+    retirement = admin.call(position + "/revisions", {
+        "revision_id": revision["id"], "department_id": department_id, "title": revision["title"],
+        "effective_from": "2026-04-10", "active": False,
+    }, key="retire-with-active-employment", status=409)
+    assert retirement["error"] == "position_still_occupied"
+    active, = retirement["details"]["assignments"]
+    assert active["employment_id"] == employee["employment_id"] and active["effective_from"] == "2026-04-01"
     assert admin.call(
         position + "/budgets",
         {"starts_on": "2026-05-01", "ends_before": "2026-06-01", "capacity": 0},
@@ -1053,6 +1122,7 @@ def run(origin, group):
     retro_trial(company, original_payroll, department_id)
     admin.call(target + "/roles", {"account_id": receiving_id, "role": "payroll_reviewer"})
     payslip_inquiries(company, original_payroll, actors[0], receiving, target)
+    verify_group_isolation(origin, credentials, company, original_payroll[4], original_payroll[5])
     group_costs = "/api/payroll/department-costs?period_start=2026-04-01"
     assert receiving.call(group_costs)["companies"] == []
     receiving.call(original_payroll[4] + "/department-costs", status=404)
@@ -1075,10 +1145,5 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit("Usage: python tests/http_smoke.py http://127.0.0.1:8080")
     group_code = "http-" + secrets.token_hex(5)
-    php = ["php", "-d", "extension=pdo_mysql"] if sys.platform == "win32" else ["php"]
-    subprocess.run(
-        [*php, "bin/hcm.php", "create-group", group_code, "HTTP Fixture", "http-admin@example.test", "Admin"],
-        input=b"Fixture-hcm-pass-99\n",
-        check=True,
-    )
+    create_group(group_code, "Fixture-hcm-pass-99")
     run(sys.argv[1].rstrip("/"), group_code)

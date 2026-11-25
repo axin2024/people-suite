@@ -1,0 +1,56 @@
+name: people-suite
+
+x-hcm-app: &hcm-app
+  build: .
+  image: people-suite:local
+  environment:
+    HCM_DSN: mysql:host=db;port=3306;dbname=${HCM_DB_NAME:-people_suite};charset=utf8mb4
+    HCM_DB_USER: people_suite
+    HCM_DB_PASSWORD: ${HCM_DB_PASSWORD:?Set HCM_DB_PASSWORD}
+    HCM_COOKIE_SECURE: "${HCM_COOKIE_SECURE:-0}"
+
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${HCM_DB_NAME:-people_suite}
+      MYSQL_USER: people_suite
+      MYSQL_PASSWORD: ${HCM_DB_PASSWORD:?Set HCM_DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${HCM_MYSQL_ROOT_PASSWORD:?Set HCM_MYSQL_ROOT_PASSWORD}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$$MYSQL_PASSWORD" mysql --protocol=TCP -h 127.0.0.1 -u "$$MYSQL_USER" "$$MYSQL_DATABASE" -N -e 'SELECT 1'
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - mysql-data:/var/lib/mysql
+    restart: unless-stopped
+  migrate:
+    <<: *hcm-app
+    command: ["php", "bin/hcm.php", "migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+  web:
+    <<: *hcm-app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${HCM_HTTP_PORT:-8080}:80"
+    healthcheck:
+      test:
+        - CMD
+        - php
+        - -r
+        - "exit(@file_get_contents('http://127.0.0.1/healthz') === '{\"ready\":true}' ? 0 : 1);"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  mysql-data:

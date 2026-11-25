@@ -6,6 +6,8 @@ People Suite 面向有多个法人的集团，提供独立部署的组织、招�
 
 ## 本地运行
 
+使用容器可以从空库启动，见 [自托管部署](docs/deployment.md)。使用已有 PHP 与 MySQL 时按下文运行。
+
 准备 PHP 8.2 或更高版本，开启 `pdo_mysql` 和 `mbstring`。在 MySQL 8.4 创建专用 UTF-8 数据库和应用账号。按 [配置参考](docs/configuration.md) 设置环境变量。
 
 ```sh
@@ -46,6 +48,8 @@ HR 可在任职档案按日核对岗位、续签合同或提交调动，调岗�
 
 运行 `php -d memory_limit=256M tests/payroll_capacity.php 1000` 可复现一个法人 1,000 人的月度试算、封账与部门成本核对。参见[容量验收记录](docs/payroll-capacity.md)。
 
+完整用例与回读见 [业务验收](docs/acceptance.md)，对应的需求基线见 [PRD](docs/requirements/01-产品总览-prd.md)。
+
 ## 许可
 
-项目采用 [Apache License 2.0](LICENSE)。
+项目采用 [Apache License 2.0](LICENSE)。参见 [依赖与材料来源](docs/third-party.md)、[参与开发](CONTRIBUTING.md) 与 [安全反馈](SECURITY.md)。

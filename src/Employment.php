@@ -132,6 +132,11 @@ final class Employment
             $this->endAssignment($prior, $from);
             $assignment = $this->insertAssignment($actor, $company, $employment, $position, $revision, $slot, $from, $version + 1);
             $this->db->run('UPDATE employments SET assignment_version=assignment_version+1 WHERE id=?', [$employment]);
+            $scope = [$actor->groupId, $company, $employment];
+            $impact = [
+                'shifts' => $this->affectedByTransfer($scope, $from, null, 'shifts', 0),
+                'cost_periods' => $this->affectedByTransfer($scope, $from, null, 'cost_periods', 0),
+            ];
             $this->operations->audit($actor, $company, 'employment', $employment, 'employment.transferred', [
                 'previous_assignment_id' => (int) $prior['id'], 'assignment_id' => $assignment, 'effective_from' => $from,
             ]);
@@ -140,8 +145,40 @@ final class Employment
                 'previous' => ['from' => $prior['effective_from'], 'until' => $from, 'department_id' => (int) $prior['department_id']],
                 'next' => ['from' => $from, 'until' => null, 'department_id' => (int) $revision['department_id']],
                 'schedule_review_from' => $from, 'cost_recalculation_from' => substr($from, 0, 7),
+                'impact' => $impact,
             ];
         });
+    }
+
+    public function transferImpact(Access $actor, int $company, int $employment, int $assignment, string $kind, int $after): array
+    {
+        $actor->company($company, 'hr');
+        $scope = [$actor->groupId, $company, $employment];
+        $current = $this->db->row(
+            'SELECT effective_from, effective_until FROM assignments
+             WHERE group_id=? AND company_id=? AND employment_id=? AND id=? AND version>1',
+            [...$scope, $assignment],
+        ) ?? throw new BusinessError(404, 'assignment_not_found');
+        return [$kind => $this->affectedByTransfer($scope, $current['effective_from'], $current['effective_until'], $kind, $after)];
+    }
+
+    private function affectedByTransfer(array $scope, string $start, ?string $end, string $kind, int $after): array
+    {
+        return match ($kind) {
+            'shifts' => $this->db->rows(
+                "SELECT id, workday, starts_at, ends_at FROM shifts
+                 WHERE group_id=? AND company_id=? AND employment_id=? AND state='scheduled'
+                   AND workday>=? AND (? IS NULL OR workday<?) AND id>? ORDER BY id LIMIT 100",
+                [...$scope, $start, $end, $end, $after],
+            ),
+            'cost_periods' => $this->db->rows(
+                'SELECT id, period_start, period_end, state FROM payroll_runs
+                 WHERE group_id=? AND company_id=? AND period_end>? AND (? IS NULL OR period_start<?) AND id>?
+                 ORDER BY id LIMIT 100',
+                [$scope[0], $scope[1], $start, $end, $end, $after],
+            ),
+            default => throw new BusinessError(422, 'invalid_assignment_impact_kind'),
+        };
     }
 
     public function requestLegalTransfer(Access $actor, int $company, int $employment, string $key, array $input): array

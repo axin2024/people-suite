@@ -189,13 +189,97 @@ final class Payroll
         unset($payslip);
         $payslips = $this->adjustments->withPayableAmounts($scope, $payslips);
         $reviews = $this->db->rows(
-            'SELECT trial_id, resulting_version, actor_id, action, decision_ref, notes, recorded_at
-             FROM payroll_review_events WHERE group_id=? AND company_id=? AND run_id=? ORDER BY resulting_version',
+            'SELECT e.trial_id, e.resulting_version, e.actor_id, e.action, e.decision_ref, e.notes, e.recorded_at,
+                    d.id AS delegation_id, d.granted_by
+             FROM payroll_review_events e LEFT JOIN payroll_review_delegations d
+               ON d.group_id=e.group_id AND d.company_id=e.company_id AND d.run_id=e.run_id
+                  AND d.resulting_version=e.resulting_version AND d.trial_id=e.trial_id AND d.delegate_id=e.actor_id
+             WHERE e.group_id=? AND e.company_id=? AND e.run_id=? ORDER BY e.resulting_version',
             [...$scope, $id],
         );
         return ['run' => $run, 'trial' => $this->withAdjustedTotals($scope, (int) $trial['id'], $trial),
             'payslips' => $payslips, 'review_events' => $reviews,
+            'delegation' => $run['state'] === 'in_review' ? $this->activeDelegation($scope, $id, (int) $run['version']) : null,
             'closure' => $this->closure($scope, $id)];
+    }
+
+    public function delegationCandidates(Access $actor, int $company, int $id, int $after): array
+    {
+        $actor->company($company, 'payroll_reviewer');
+        $scope = [$actor->groupId, $company];
+        $run = $this->run($scope, $id);
+        $this->assertReviewState($run, (int) $run['version'], 'in_review');
+        $trial = $this->currentTrial($scope, $run);
+        if ((int) $trial['calculated_by'] === $actor->accountId) {
+            throw new BusinessError(403, 'payroll_reviewer_must_differ');
+        }
+        return $this->db->rows(
+            "SELECT a.id, a.display_name FROM company_roles r JOIN accounts a
+               ON a.group_id=r.group_id AND a.id=r.account_id AND a.enabled=1
+             WHERE r.group_id=? AND r.company_id=? AND r.role='payroll_reviewer'
+               AND r.account_id>? AND r.account_id NOT IN (?, ?) ORDER BY r.account_id LIMIT 100",
+            [...$scope, $after, $actor->accountId, $trial['calculated_by']],
+        );
+    }
+
+    public function setDelegation(Access $actor, int $company, int $id, string $key, array $input, bool $assign): array
+    {
+        $actor->company($company, 'payroll_reviewer');
+        $version = Input::integer($input['version'] ?? null, 'version');
+        $prior = Input::integer($input['previous_delegation_id'] ?? 0, 'previous_delegation_id', $assign ? 0 : 1);
+        $delegate = $assign ? Input::integer($input['delegate_id'] ?? null, 'delegate_id') : null;
+        $hours = $assign ? Input::integer($input['hours'] ?? 24, 'hours', 1, 168) : null;
+        $notes = Input::text($input['notes'] ?? null, 'notes', 600);
+        $action = $assign ? 'payroll.delegation_assigned' : 'payroll.delegation_revoked';
+        return $this->operations->once($actor, $company, $action, $key, [
+            'run_id' => $id, 'version' => $version, 'previous_delegation_id' => $prior,
+            'delegate_id' => $delegate, 'hours' => $hours, 'notes' => $notes,
+        ], function () use ($actor, $company, $id, $version, $prior, $delegate, $hours, $notes, $action): array {
+            $scope = [$actor->groupId, $company];
+            $run = $this->run($scope, $id, true);
+            $this->assertReviewState($run, $version, 'in_review');
+            $trial = $this->currentTrial($scope, $run);
+            $maker = (int) $trial['calculated_by'];
+            if ($maker === $actor->accountId || $maker === $delegate) {
+                throw new BusinessError(403, 'payroll_reviewer_must_differ');
+            }
+            $existing = $this->activeDelegation($scope, $id, $version);
+            if ((int) ($existing['id'] ?? 0) !== $prior) {
+                throw new BusinessError(409, 'payroll_delegation_conflict');
+            }
+            if ($delegate !== null) {
+                if ($delegate === $actor->accountId) {
+                    throw new BusinessError(422, 'payroll_delegate_must_differ');
+                }
+                $this->lockReviewers($scope, $actor->accountId, $delegate);
+            } else {
+                if ((int) $existing['granted_by'] !== $actor->accountId) {
+                    throw new BusinessError(403, 'payroll_delegation_grantor_required');
+                }
+                $this->lockReviewers($scope, $actor->accountId);
+            }
+            if ($existing !== null) {
+                $this->finishDelegation($scope, $id, $prior, $delegate === null ? 'revoked' : 'superseded');
+            }
+            $result = ['run_id' => $id, 'version' => $version, 'trial_id' => (int) $trial['id']];
+            if ($delegate === null) {
+                $result += ['delegation_id' => $prior, 'delegate_id' => (int) $existing['delegate_id'], 'state' => 'revoked'];
+            } else {
+                $this->db->insert(
+                    'INSERT INTO payroll_review_delegations
+                        (group_id, company_id, run_id, run_version, trial_id, granted_by, delegate_id, notes, expires_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, TIMESTAMPADD(HOUR, ?, CURRENT_TIMESTAMP(6)))',
+                    [...$scope, $id, $version, $trial['id'], $actor->accountId, $delegate, $notes, $hours],
+                );
+                $current = $this->activeDelegation($scope, $id, $version);
+                $result += ['delegation_id' => (int) $current['id'], 'delegate_id' => $delegate,
+                    'state' => 'assigned', 'expires_at' => $current['expires_at']];
+            }
+            $this->operations->audit($actor, $company, 'payroll_run', $id, $action, [
+                ...$result, 'previous_delegation_id' => $prior, 'notes' => $notes,
+            ]);
+            return $result;
+        });
     }
 
     public function review(Access $actor, int $company, int $id, string $action, string $key, array $input): array
@@ -210,14 +294,17 @@ final class Payroll
         $version = Input::integer($input['version'] ?? null, 'version');
         $decision = Input::code($input['decision_ref'] ?? null, 'decision_ref');
         $notes = Input::text($input['notes'] ?? null, 'notes', 600);
+        $delegationId = isset($input['delegation_id']) ? Input::integer($input['delegation_id'], 'delegation_id') : null;
+        if ($delegationId !== null && !in_array($action, ['return', 'close'], true)) {
+            throw new BusinessError(422, 'payroll_action_cannot_be_delegated');
+        }
         return $this->operations->once($actor, $company, 'payroll.' . $action, $key, [
             'run_id' => $id, 'version' => $version, 'decision_ref' => $decision, 'notes' => $notes,
-        ], function () use ($actor, $company, $id, $action, $needed, $version, $decision, $notes): array {
+            ...($delegationId === null ? [] : ['delegation_id' => $delegationId]),
+        ], function () use ($actor, $company, $id, $action, $needed, $version, $decision, $notes, $delegationId): array {
             $scope = [$actor->groupId, $company];
             $run = $this->run($scope, $id, true);
-            if ((int) $run['version'] !== $version || $run['state'] !== $needed) {
-                throw new BusinessError(409, 'payroll_run_conflict', ['version' => (int) $run['version'], 'state' => $run['state']]);
-            }
+            $this->assertReviewState($run, $version, $needed);
             $trial = $this->currentTrial($scope, $run);
             $preparedByActor = (int) $trial['calculated_by'] === $actor->accountId;
             if ($action === 'submit' && !$preparedByActor) {
@@ -225,6 +312,20 @@ final class Payroll
             }
             if ($action !== 'submit' && $preparedByActor) {
                 throw new BusinessError(403, 'payroll_reviewer_must_differ');
+            }
+            $activeDelegation = $needed === 'in_review' ? $this->activeDelegation($scope, $id, $version) : null;
+            $delegationFacts = [];
+            if ($delegationId !== null) {
+                if ($activeDelegation === null || (int) $activeDelegation['id'] !== $delegationId
+                    || (int) $activeDelegation['trial_id'] !== (int) $trial['id'] || $activeDelegation['expired']) {
+                    throw new BusinessError(409, 'payroll_delegation_conflict');
+                }
+                if ((int) $activeDelegation['delegate_id'] !== $actor->accountId) {
+                    throw new BusinessError(403, 'payroll_delegate_required');
+                }
+                $grantor = (int) $activeDelegation['granted_by'];
+                $this->lockReviewers($scope, $actor->accountId, $grantor);
+                $delegationFacts = ['delegation_id' => $delegationId, 'granted_by' => $grantor];
             }
             if ($action === 'submit') {
                 $this->adjustments->assertIncluded($scope, $id, (int) $trial['id']);
@@ -263,15 +364,58 @@ final class Payroll
                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [...$scope, $id, $trial['id'], $version + 1, $actor->accountId, $action, $decision, $notes],
             );
+            if ($activeDelegation !== null) {
+                $this->finishDelegation($scope, $id, (int) $activeDelegation['id'], $delegationId === null ? 'superseded' : 'used');
+            }
             $this->db->run('UPDATE payroll_runs SET state=?, version=version+1 WHERE id=?', [$next, $id]);
             $this->operations->audit($actor, $company, 'payroll_run', $id, 'payroll.' . $action, [
                 'trial_id' => (int) $trial['id'], 'decision_ref' => $decision, 'version' => $version + 1, 'digest' => $digest,
+                ...$delegationFacts,
             ]);
             return [
                 'run_id' => $id, 'trial_id' => (int) $trial['id'], 'version' => $version + 1, 'state' => $next,
-                'decision_ref' => $decision, 'digest' => $digest,
+                'decision_ref' => $decision, 'digest' => $digest, ...$delegationFacts,
             ];
         });
+    }
+
+    private function activeDelegation(array $scope, int $id, int $version): ?array
+    {
+        return $this->db->row(
+            'SELECT id, trial_id, granted_by, delegate_id, notes, expires_at, expires_at<=CURRENT_TIMESTAMP(6) AS expired
+             FROM payroll_review_delegations WHERE group_id=? AND company_id=? AND run_id=? AND assigned_version=?',
+            [...$scope, $id, $version],
+        );
+    }
+
+    private function finishDelegation(array $scope, int $id, int $delegation, string $state): void
+    {
+        $this->db->run(
+            'UPDATE payroll_review_delegations SET state=?, finished_at=CURRENT_TIMESTAMP(6)
+             WHERE group_id=? AND company_id=? AND run_id=? AND id=?',
+            [$state, ...$scope, $id, $delegation],
+        );
+    }
+
+    private function lockReviewers(array $scope, int ...$accounts): void
+    {
+        sort($accounts, SORT_NUMERIC);
+        foreach ($accounts as $account) {
+            if ($this->db->row(
+                "SELECT a.id FROM company_roles r JOIN accounts a ON a.group_id=r.group_id AND a.id=r.account_id
+                 WHERE r.group_id=? AND r.company_id=? AND r.account_id=? AND r.role='payroll_reviewer' AND a.enabled=1 FOR SHARE",
+                [...$scope, $account],
+            ) === null) {
+                throw new BusinessError(404, 'payroll_reviewer_not_found');
+            }
+        }
+    }
+
+    private function assertReviewState(array $run, int $version, string $state): void
+    {
+        if ((int) $run['version'] !== $version || $run['state'] !== $state) {
+            throw new BusinessError(409, 'payroll_run_conflict', ['version' => (int) $run['version'], 'state' => $run['state']]);
+        }
     }
 
     public function verifyClosure(Access $actor, int $company, int $id): array

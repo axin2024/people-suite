@@ -57,6 +57,7 @@
 | GET `/employments/{id}` | 查询人事档案、带岗位和部门名称的任职时间线及合同版本。可加 `?on=2026-04-16` 获取该日任职段。 |
 | POST `/employments/{id}/contracts` | 键。提交当前合同 `version`、`contract_ref`、`effective_from`、`monthly_minor`、可选 `ends_before`。续签新增版本。 |
 | POST `/employments/{id}/transfers` | 键。提交 `assignment_version`、目标 `position_id`、`effective_from`。返回任职分段及需复核的假勤和成本期间。 |
+| GET `/employments/{id}/transfer-impact` | HR 提供调岗形成的 `assignment_id`，以及 `kind=shifts` 或 `kind=cost_periods`。只查该任职段内相关记录，使用 `after=ID` 翻页。 |
 | POST `/employments/{id}/legal-transfers` | 键。来源法人 HR 提交 `assignment_version`、`target_company_id`、`target_position_id`、`effective_from`。 |
 | GET `/employments/{id}/legal-transfers` | 来源法人 HR 查看转出单、接收决定和源版本失效标记，支持 `after=ID`。 |
 | GET `/legal-transfers` | 接收法人 HR 查看待接收调动。传 `state=accepted` 查看已接收调动，支持 `after=ID`。 |
@@ -64,6 +65,8 @@
 | POST `/legal-transfers/{id}/accept` | 键。由另一位接收法人 HR 提交 `decision_ref`、接收合同 `contract_ref`、`monthly_minor`、可选 `ends_before`。 |
 
 调岗时，上一段在切换日开始前结束，下一段从切换日开始。状态过期或日期冲突返回 `assignment_interval_conflict`，可读取当前版本和区间。跨法人接收将转出、目标编制、目标合同和两方审计记录写入同一事务。主岗后续有调动或终止时，旧申请在历史中以 `stale=1` 标明，并退出待接收队列。
+
+法人内调岗的 `impact` 回执保留提交时的首批班次和账期，每类最多 100 行。从历史查询生成当前影响名单，取消的班次会移出。成本名单只返回法人账期、日期和状态，已封账账期通过追溯补差处理。
 
 ## 排班、打卡与考勤
 
@@ -90,6 +93,7 @@
 - `GET /attendance/imports` 查询当前 HR 创建的批次，支持 `after=ID`。批次及其行的读写均限创建者。
 - `POST /attendance/imports` 带请求键，提交 `kind`（`roster` 或 `punches`）和最多 100 个 `rows`。每行带唯一 `row_ref`，及对应班表或打卡字段。班表行带 `employment_id`，打卡行带 `shift_id`。
 - `POST /attendance/imports/{id}/run` 每次最多处理 25 行。可传 `limit`、`after_row` 和 `retry_failed`。断开后回到原批次继续，成功行保留初次回执。
+- `POST /attendance/imports/{id}/retry` 带请求键，提交 `line_nos`，包含 1 至 25 个不同的原批次行号。回执按行列出重试结果，待处理、已成功或不存在的行会返回拒绝原因。用相同请求键重复提交同一选集时返回原回执。
 - `GET /attendance/imports/{id}` 返回待处理、成功、失败的数量，以及每行的尝试次数和结果。
 
 ### 假期余额
@@ -133,6 +137,10 @@
 | POST `/runs/{id}/publish` | 独立复核人发布。系统重新核对封账摘要。 |
 | GET `/my-payslips` | 本人已发布工资单，可用 `?after=ID` 分页。 |
 | GET `/my-payslips/{id}` | 本人指定已发布工资单与封账摘要。 |
+
+待审账期的复核人可使用 `GET /runs/{id}/delegation-candidates?after=ID` 查询同法人独立复核人，排除制单人与自己。带请求键提交 `POST /runs/{id}/delegate`，字段为 `version`、`delegate_id`、`hours`（1 至 168）、`notes` 以及更换时的 `previous_delegation_id`。委托人可用 `POST /runs/{id}/revoke-delegation`，提交当前版本、`previous_delegation_id` 和 `notes`。
+
+指定人员代办退回或封账时传 `delegation_id`。复核时校验当前账期、试算和双方的法人权限，委托过期或替换后需要重新读取。审核记录保留实际操作人、委托人及其代办编号。发布仍由独立复核人直接执行。
 
 ### 追溯补差
 

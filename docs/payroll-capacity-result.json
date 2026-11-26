@@ -1,0 +1,29 @@
+{
+    "workers": 1000,
+    "period_start": "2026-04-01",
+    "shifts_per_worker": 20,
+    "ready_payslips": 1000,
+    "blocked": 0,
+    "gross_minor": 900000000,
+    "department_cost_minor": 450000000,
+    "setup_seconds": 92.7293,
+    "warmup_seconds": 2.8077,
+    "measured_trial_seconds": [
+        2.8828,
+        2.6916,
+        3.0957
+    ],
+    "worst_trial_seconds": 3.0957,
+    "slo_seconds": 300,
+    "submit_close_and_verify_seconds": 0.0895,
+    "memory_limit": "256M",
+    "measured_php_peak_memory_mib": [
+        4,
+        4,
+        4
+    ],
+    "php": "8.2.30",
+    "mysql": "8.4.13",
+    "innodb_buffer_pool_bytes": 134217728,
+    "mysql_max_connections": 151
+}

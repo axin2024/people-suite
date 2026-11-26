@@ -79,7 +79,7 @@ async function payrollRuns(ctx, route) {
     const path = `${source}/${route.run}`;
     const details = await ctx.request(path);
     if (!ctx.current()) return [];
-    const { run, trial, review_events: reviewEvents, closure } = details;
+    const { run, trial, review_events: reviewEvents, closure, delegation } = details;
     ctx.tools(button("返回账期列表", () => ctx.go()));
     const result = [panel(`${periodOf(run.period_start)} 薪资账期`, facts([
         ["状态", statuses[run.state]], ["账期编号", run.id], ["当前版本", run.version], ["试算批次", run.trial_revision || "—"],
@@ -104,18 +104,23 @@ async function payrollRuns(ctx, route) {
     const editable = ["draft", "calculated"].includes(run.state);
     if (editable && canMake(ctx)) result.push(await trialPanel(ctx, run, trial, path));
     const actions = [];
+    const delegatedReview = delegation && !delegation.expired && delegation.delegate_id === ctx.accountId;
     if (run.state === "calculated" && canMake(ctx) && trial.calculated_by === ctx.accountId && !trial.blocked_count && trial.eligible_count) {
         actions.push(["submit", "送交复核"]);
     }
     if (canReview(ctx) && trial && trial.calculated_by !== ctx.accountId && run.state === "in_review") {
-        actions.push(["close", "确认封账"], ["return", "退回重算", true]);
+        actions.push(["close", delegatedReview ? "代办确认封账" : "确认封账"],
+            ["return", delegatedReview ? "代办退回重算" : "退回重算", true]);
+        result.push(await delegationPanel(ctx, route, path, run, delegation));
     }
     if (canReview(ctx) && trial && trial.calculated_by !== ctx.accountId && run.state === "closed") {
         actions.push(["publish", "发布工资单"]);
     }
     if (actions.length) {
         const form = ctx.form([reference("决定编号"), noteField()], actions,
-            (action, body, key) => ctx.request(`${path}/${action}`, { ...body, version: run.version }, key),
+            (action, body, key) => ctx.request(`${path}/${action}`, {
+                ...body, version: run.version, ...(delegatedReview ? { delegation_id: delegation.id } : {}),
+            }, key),
             (_, action) => ctx.go(route, `账期已${reviewLabels[action]}。`));
         result.push(panel("送审与复核", form));
     }
@@ -123,11 +128,44 @@ async function payrollRuns(ctx, route) {
         result.push(panel("送审条件", empty("请处理上表的阻断工资单，再按新的考勤水位重新试算。")));
     }
     if (closure) result.push(closurePanel(ctx, path, closure));
-    if (reviewEvents.length) result.push(panel("审核时间线", table(["结果版本", "操作", "决定编号", "处理人", "处理说明", "记录时间"],
+    if (reviewEvents.length) result.push(panel("审核时间线", table(["结果版本", "操作", "决定编号", "实际处理人", "委托人", "处理说明", "记录时间"],
         reviewEvents.map((event) => [event.resulting_version, reviewLabels[event.action], event.decision_ref,
-            event.actor_id, event.notes, event.recorded_at]))));
+            event.actor_id, event.granted_by ?? "—", event.notes, event.recorded_at]))));
     result.push(await adjustmentsPanel(ctx, path, route, editable));
     return result;
+}
+
+async function delegationPanel(ctx, route, path, run, delegation) {
+    const { reviewers } = await ctx.request(path + "/delegation-candidates");
+    const content = [];
+    if (delegation) {
+        content.push(facts([
+            ["状态", delegation.expired ? "已过期" : "待代办"],
+            ["委托人账号", delegation.granted_by], ["代办人账号", delegation.delegate_id],
+            ["到期（UTC）", delegation.expires_at], ["委托说明", delegation.notes],
+        ]));
+    }
+    const scope = { version: run.version, previous_delegation_id: delegation?.id ?? 0 };
+    if (reviewers.length) {
+        const list = node("datalist");
+        list.id = "payroll-delegation-candidates";
+        list.append(...reviewers.map((reviewer) => new Option(reviewer.display_name, reviewer.id)));
+        const assign = ctx.form([
+            numberField("代办人账号", "delegate_id", { min: 1, list: list.id }),
+            numberField("有效小时数", "hours", { min: 1, max: 168, value: 24 }), noteField("委托说明"),
+        ], [["delegate", delegation ? "更换代办" : "指定代办"]],
+        (_, body, key) => ctx.request(path + "/delegate", { ...body, ...scope }, key),
+        () => ctx.go(route, "薪资复核代办已指定。"));
+        content.push(assign, list);
+    } else {
+        content.push(empty("当前法人没有其他可委托的薪资复核人。"));
+    }
+    if (delegation?.granted_by === ctx.accountId) {
+        content.push(ctx.form([noteField("撤销说明")], [["revoke", "撤销代办", true]],
+            (_, body, key) => ctx.request(path + "/revoke-delegation", { ...body, ...scope }, key),
+            () => ctx.go(route, "薪资复核代办已撤销。")));
+    }
+    return panel("复核代办", ...content);
 }
 
 function blockingReason(data) {

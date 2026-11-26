@@ -11,6 +11,8 @@ use Throwable;
 
 final class Database
 {
+    private int $savepointSequence = 0;
+
     private function __construct(private readonly PDO $connection)
     {
     }
@@ -58,6 +60,24 @@ final class Database
 
     public function transaction(callable $work, bool $repeatableRead = false): mixed
     {
+        if ($this->connection->inTransaction()) {
+            if ($repeatableRead) {
+                throw new LogicException('Set the isolation level when opening the outer transaction.');
+            }
+            $savepoint = 'hcm_work_' . ++$this->savepointSequence;
+            $this->connection->exec('SAVEPOINT ' . $savepoint);
+            try {
+                $result = $work();
+            } catch (Throwable $error) {
+                if ($this->connection->inTransaction()) {
+                    $this->connection->exec('ROLLBACK TO SAVEPOINT ' . $savepoint);
+                    $this->connection->exec('RELEASE SAVEPOINT ' . $savepoint);
+                }
+                throw $error;
+            }
+            $this->connection->exec('RELEASE SAVEPOINT ' . $savepoint);
+            return $result;
+        }
         if ($repeatableRead) {
             $this->connection->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
         }

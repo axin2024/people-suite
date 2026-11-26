@@ -1,0 +1,32 @@
+{
+  "previous_tag": "v1.0.0",
+  "previous_commit": "9e4e3b6c4d9c25739b5047d6b943e7ceec3a84d6",
+  "migrations": [
+    "015_payroll_review_delegations"
+  ],
+  "matching_business_facts": true,
+  "restored_result": {
+    "group": "north-demo",
+    "currency": "CNY",
+    "april": {
+      "run": 1,
+      "payslip": 2,
+      "payable_minor": 900000,
+      "cost_split_minor": {
+        "OPS": 450000,
+        "FIN": 450000
+      },
+      "digest": "0c2dd5f2983be2d5974f0300d45107fd65049639be5794b0b739961efd2d9d45"
+    },
+    "may": {
+      "run": 2,
+      "payslip": 3,
+      "payable_minor": 930000,
+      "adjustment_minor": 30000,
+      "adjustment_rows": 1,
+      "department": "OPS",
+      "decision_ref": "APRIL-RATE-CORRECTION",
+      "digest": "4e0c271e246881dc8f5bb2642cdd8de8845b7a7179c59c0bc56e9aaab43f5927"
+    }
+  }
+}

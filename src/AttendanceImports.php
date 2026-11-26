@@ -60,46 +60,91 @@ final class AttendanceImports
 
     public function run(Access $actor, int $company, int $id, array $input): array
     {
-        $import = $this->owned($actor, $company, $id);
+        $actor->company($company, 'hr');
         $limit = Input::integer($input['limit'] ?? 25, 'limit', 1, 25);
         $after = Input::integer($input['after_row'] ?? 0, 'after_row', 0, 100);
         $retry = $input['retry_failed'] ?? false;
         if (!is_bool($retry)) {
             throw new BusinessError(422, 'invalid_retry_failed_flag');
         }
-        $scope = [$actor->groupId, $company, $id];
-        $states = $retry ? "('pending','failed')" : "('pending')";
-        $rows = $this->db->rows(
-            "SELECT line_no, payload FROM attendance_import_rows
-             WHERE group_id=? AND company_id=? AND import_id=? AND state IN {$states} AND line_no>?
-             ORDER BY line_no LIMIT " . $limit,
-            [...$scope, $after],
-        );
-
-        foreach ($rows as $row) {
-            $number = (int) $row['line_no'];
-            $payload = json_decode($row['payload'], true, flags: JSON_THROW_ON_ERROR);
-            $key = 'import-' . substr(hash('sha256', $id . ':' . $number), 0, 40);
-            try {
-                $result = $import['kind'] === 'roster'
-                    ? $this->attendance->schedule(
-                        $actor, $company, Input::integer($payload['employment_id'] ?? null, 'employment_id'), $key, $payload,
-                    )
-                    : $this->attendance->punch(
-                        $actor, $company, Input::integer($payload['shift_id'] ?? null, 'shift_id'), $key, $payload,
-                    );
-                $state = 'succeeded';
-            } catch (BusinessError $error) {
-                $state = 'failed';
-                $result = ['error' => $error->reason, 'details' => $error->details, 'status' => $error->status];
-            }
-            $this->db->run(
-                "UPDATE attendance_import_rows SET state=?, outcome=?, attempts=attempts+1
-                 WHERE group_id=? AND company_id=? AND import_id=? AND line_no=? AND state<>'succeeded'",
-                [$state, json_encode($result, JSON_THROW_ON_ERROR), ...$scope, $number],
+        return $this->db->transaction(function () use ($actor, $company, $id, $limit, $after, $retry): array {
+            $import = $this->owned($actor, $company, $id, true);
+            $scope = [$actor->groupId, $company, $id];
+            $states = $retry ? "('pending','failed')" : "('pending')";
+            $rows = $this->db->rows(
+                "SELECT line_no, payload FROM attendance_import_rows
+                 WHERE group_id=? AND company_id=? AND import_id=? AND state IN {$states} AND line_no>?
+                 ORDER BY line_no LIMIT " . $limit,
+                [...$scope, $after],
             );
+            foreach ($rows as $row) {
+                $this->processRow($actor, $scope, $import['kind'], $row);
+            }
+            return $this->status($actor, $company, $id);
+        });
+    }
+
+    public function retry(Access $actor, int $company, int $id, string $key, array $input): array
+    {
+        $this->owned($actor, $company, $id);
+        $selection = $input['line_nos'] ?? null;
+        if (!is_array($selection) || !array_is_list($selection) || $selection === [] || count($selection) > 25) {
+            throw new BusinessError(422, 'invalid_attendance_retry_selection');
         }
-        return $this->status($actor, $company, $id);
+        $selection = array_map(static fn ($number): int => Input::integer($number, 'line_no', 1, 100), $selection);
+        if (count(array_unique($selection)) !== count($selection)) {
+            throw new BusinessError(422, 'invalid_attendance_retry_selection');
+        }
+        sort($selection, SORT_NUMERIC);
+
+        return $this->operations->once($actor, $company, 'attendance.import.retry', $key, [
+            'import_id' => $id, 'line_nos' => $selection,
+        ], function () use ($actor, $company, $id, $selection): array {
+            $import = $this->owned($actor, $company, $id, true);
+            $scope = [$actor->groupId, $company, $id];
+            $results = [];
+            foreach ($selection as $number) {
+                $row = $this->db->row(
+                    'SELECT line_no, state, payload FROM attendance_import_rows
+                     WHERE group_id=? AND company_id=? AND import_id=? AND line_no=?',
+                    [...$scope, $number],
+                );
+                $results[] = $row !== null && $row['state'] === 'failed'
+                    ? $this->processRow($actor, $scope, $import['kind'], $row)
+                    : ['line_no' => $number, 'state' => 'rejected', 'reason' => $row['state'] ?? 'line_not_found'];
+            }
+            $this->operations->audit($actor, $company, 'attendance_import', $id, 'attendance.import_retried', [
+                'line_nos' => $selection, 'results' => $results,
+            ]);
+            return ['import_id' => $id, 'line_nos' => $selection, 'results' => $results];
+        });
+    }
+
+    private function processRow(Access $actor, array $scope, string $kind, array $row): array
+    {
+        [, $company, $id] = $scope;
+        $number = (int) $row['line_no'];
+        $payload = json_decode($row['payload'], true, flags: JSON_THROW_ON_ERROR);
+        $key = 'import-' . substr(hash('sha256', $id . ':' . $number), 0, 40);
+        try {
+            $result = $kind === 'roster'
+                ? $this->attendance->schedule(
+                    $actor, $company, Input::integer($payload['employment_id'] ?? null, 'employment_id'), $key, $payload,
+                )
+                : $this->attendance->punch(
+                    $actor, $company, Input::integer($payload['shift_id'] ?? null, 'shift_id'), $key, $payload,
+                );
+            $state = 'succeeded';
+        } catch (BusinessError $error) {
+            $state = 'failed';
+            $result = ['error' => $error->reason, 'details' => $error->details, 'status' => $error->status];
+        }
+        $this->db->run(
+            'UPDATE attendance_import_rows SET state=?, outcome=?, attempts=attempts+1
+             WHERE group_id=? AND company_id=? AND import_id=? AND line_no=?',
+            [$state, json_encode($result, JSON_THROW_ON_ERROR), ...$scope, $number],
+        );
+        return ['line_no' => $number, 'state' => $state, 'outcome' => $result];
     }
 
     public function status(Access $actor, int $company, int $id): array
@@ -131,11 +176,12 @@ final class AttendanceImports
         );
     }
 
-    private function owned(Access $actor, int $company, int $id): array
+    private function owned(Access $actor, int $company, int $id, bool $lock = false): array
     {
         $actor->company($company, 'hr');
         return $this->db->row(
-            'SELECT id, kind, row_count, created_at FROM attendance_imports WHERE group_id=? AND company_id=? AND owner_id=? AND id=?',
+            'SELECT id, kind, row_count, created_at FROM attendance_imports
+             WHERE group_id=? AND company_id=? AND owner_id=? AND id=?' . ($lock ? ' FOR UPDATE' : ''),
             [$actor->groupId, $company, $actor->accountId, $id],
         ) ?? throw new BusinessError(404, 'attendance_import_not_found');
     }

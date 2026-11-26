@@ -214,7 +214,7 @@ final class HttpApi
         if (preg_match('#^employments/([0-9]{1,19})/(account|manager|shifts|attendance-certifications|leave(?:/.*)?)$#D', $resource, $match)) {
             return $this->workforceRoute($method, $match[2], $actor, $company, Input::integer($match[1], 'employment_id'), $input);
         }
-        if (preg_match('#^employments/([0-9]{1,19})(?:/(contracts|transfers|legal-transfers))?$#D', $resource, $match)) {
+        if (preg_match('#^employments/([0-9]{1,19})(?:/(contracts|transfers|transfer-impact|legal-transfers))?$#D', $resource, $match)) {
             $id = Input::integer($match[1], 'employment_id');
             return match ($method . '/' . ($match[2] ?? '')) {
                 'GET/' => [200, array_key_exists('on', $_GET)
@@ -222,6 +222,10 @@ final class HttpApi
                     : $this->employment->history($actor, $company, $id)],
                 'POST/contracts' => [200, $this->employment->renew($actor, $company, $id, $this->requestKey(), $input)],
                 'POST/transfers' => [200, $this->employment->transfer($actor, $company, $id, $this->requestKey(), $input)],
+                'GET/transfer-impact' => [200, $this->employment->transferImpact(
+                    $actor, $company, $id, Input::integer($_GET['assignment_id'] ?? null, 'assignment_id'),
+                    Input::text($_GET['kind'] ?? null, 'kind', 12), Input::integer($_GET['after'] ?? 0, 'after', 0),
+                )],
                 'GET/legal-transfers' => [200, ['outgoing' => $this->employment->outgoingTransfers(
                     $actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0),
                 )]],
@@ -341,7 +345,7 @@ final class HttpApi
                 ? $this->payrollInquiries->answer($actor, $company, $inquiry, $key, $input)
                 : $this->payrollInquiries->acknowledge($actor, $company, $inquiry, $key, $input)];
         }
-        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments|department-costs(?:\.csv)?))?$#D', $resource, $match)) {
+        if (!preg_match('#^payroll/runs/([0-9]{1,19})(?:/(trial|submit|return|close|publish|verify-closure|adjustments|delegation-candidates|delegate|revoke-delegation|department-costs(?:\.csv)?))?$#D', $resource, $match)) {
             throw new BusinessError(404, 'route_not_found');
         }
         $id = Input::integer($match[1], 'payroll_run_id');
@@ -351,6 +355,12 @@ final class HttpApi
                 $actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0),
             )]],
             'POST/adjustments' => [201, $this->payrollAdjustments->record($actor, $company, $id, $this->requestKey(), $input)],
+            'GET/delegation-candidates' => [200, ['reviewers' => $this->payroll->delegationCandidates(
+                $actor, $company, $id, Input::integer($_GET['after'] ?? 0, 'after', 0),
+            )]],
+            'POST/delegate', 'POST/revoke-delegation' => [200, $this->payroll->setDelegation(
+                $actor, $company, $id, $this->requestKey(), $input, $match[2] === 'delegate',
+            )],
             'POST/submit', 'POST/return', 'POST/close', 'POST/publish' => [200, $this->payroll->review(
                 $actor, $company, $id, $match[2], $this->requestKey(), $input,
             )],
@@ -499,11 +509,12 @@ final class HttpApi
         if ($method === 'POST' && $resource === 'attendance/imports') {
             return [201, $this->attendanceImports->submit($actor, $company, $this->requestKey(), $input)];
         }
-        if (preg_match('#^attendance/imports/([0-9]{1,19})(/run)?$#D', $resource, $match)) {
+        if (preg_match('#^attendance/imports/([0-9]{1,19})(/run|/retry)?$#D', $resource, $match)) {
             $id = Input::integer($match[1], 'import_id');
             return match ($method . ($match[2] ?? '')) {
                 'GET' => [200, $this->attendanceImports->status($actor, $company, $id)],
                 'POST/run' => [200, $this->attendanceImports->run($actor, $company, $id, $input)],
+                'POST/retry' => [200, $this->attendanceImports->retry($actor, $company, $id, $this->requestKey(), $input)],
                 default => throw new BusinessError(404, 'route_not_found'),
             };
         }

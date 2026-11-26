@@ -185,6 +185,7 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
             {"row_ref": "one", "employment_id": int(employment.rsplit("/", 1)[1]),
              "workday": "2026-04-23", "starts_at": "2026-04-23T09:00:00+08:00", "ends_at": "2026-04-23T17:00:00+08:00"},
             {"row_ref": "two", "employment_id": int(employment.rsplit("/", 1)[1]), **night},
+            {"row_ref": "three", "employment_id": int(employment.rsplit("/", 1)[1]), **night},
         ],
     }
     import_id = admin.call(imports, roster_import, key="roster-import", status=201)["import_id"]
@@ -196,13 +197,30 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     _, other_hr = create_login(admin, origin, company, credentials, "other-hr", "hr")
     assert other_hr.call(imports)["batches"] == []
     other_hr.call(import_path, status=404)
-    assert admin.call(import_path)["counts"] == {"pending": 2, "succeeded": 0, "failed": 0}
-    assert admin.call(import_path + "/run", {"limit": 1})["counts"] == {"pending": 1, "succeeded": 1, "failed": 0}
+    retry_path = import_path + "/retry"
+    assert admin.call(import_path)["counts"] == {"pending": 3, "succeeded": 0, "failed": 0}
+    assert admin.call(import_path + "/run", {"limit": 1})["counts"] == {"pending": 2, "succeeded": 1, "failed": 0}
+    pending = admin.call(retry_path, {"line_nos": [2]}, key="pending-roster")
+    assert pending["results"] == [{"line_no": 2, "state": "rejected", "reason": "pending"}]
     resumed = admin.call(import_path + "/run", {})
-    assert resumed["counts"] == {"pending": 0, "succeeded": 1, "failed": 1}
+    assert resumed["counts"] == {"pending": 0, "succeeded": 1, "failed": 2}
     assert resumed["rows"][1]["outcome"]["error"] == "shift_overlap"
+    other_hr.call(retry_path, {"line_nos": [2]}, key="not-owner", status=404)
+    outsider.call(retry_path, {"line_nos": [2]}, key="other-manager-retry", status=404)
+    admin.call(retry_path, {"line_nos": [2, 2]}, key="duplicate-roster-lines", status=422)
+    selection = {"line_nos": [2, 1, 9]}
+    receipt = admin.call(retry_path, selection, key="retry-line-two")
+    assert receipt["import_id"] == import_id and receipt["line_nos"] == [1, 2, 9]
+    assert receipt["results"] == [
+        {"line_no": 1, "state": "rejected", "reason": "succeeded"},
+        {"line_no": 2, "state": "failed", "outcome": resumed["rows"][1]["outcome"]},
+        {"line_no": 9, "state": "rejected", "reason": "line_not_found"},
+    ]
+    assert admin.call(retry_path, {"line_nos": [9, 2, 1]}, key="retry-line-two") == receipt
+    assert admin.call(retry_path, {"line_nos": [3]}, key="retry-line-two", status=409)["error"] == "request_key_conflict"
+    assert [row["attempts"] for row in admin.call(import_path)["rows"]] == [1, 2, 1]
     retried = admin.call(import_path + "/run", {"retry_failed": True})
-    assert [row["attempts"] for row in retried["rows"]] == [1, 2]
+    assert [row["attempts"] for row in retried["rows"]] == [1, 3, 2]
     imported_shift = resumed["rows"][0]["outcome"]["shift_id"]
     punches_import = {"kind": "punches", "rows": [
         {"row_ref": "in", "shift_id": imported_shift, "source": "GATE-01", "event_ref": "DAY-IN",
@@ -260,7 +278,7 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
 def payroll_trial(admin, origin, credentials, company, employment, department_id, finance, actors):
     manager, employee, imported_shift = actors
     maker_id, maker = create_login(admin, origin, company, credentials, "payroll-maker", "payroll_maker")
-    _, reviewer = create_login(admin, origin, company, credentials, "payroll-reviewer", "payroll_reviewer")
+    reviewer_id, reviewer = create_login(admin, origin, company, credentials, "payroll-reviewer", "payroll_reviewer")
     payroll = company + "/payroll"
     rule_input = {"rule_ref": "BASE-30", "title": "30 day demo", "proration_basis": "fixed_30"}
     reviewer.call(payroll + "/rules", rule_input, key="blocked-rule", status=404)
@@ -362,16 +380,50 @@ def payroll_trial(admin, origin, credentials, company, employment, department_id
     admin.call(company + "/roles", {"account_id": maker_id, "role": "payroll_reviewer"})
     close = {"version": submitted["version"], "decision_ref": "CLOSE-1", "notes": "Checked against attendance and contract"}
     assert maker.call(run_path + "/close", close, key="self-close", status=403)["error"] == "payroll_reviewer_must_differ"
-    returned = reviewer.call(
-        run_path + "/return", {**close, "decision_ref": "RETURN-1", "notes": "Check fixture reconciliation again"},
-        key="return",
-    )
-    assert returned["state"] == "calculated"
+    delegate_id, delegate = create_login(admin, origin, company, credentials, "payroll-delegate", "payroll_reviewer")
+    candidates = run_path + "/delegation-candidates"
+    assign = run_path + "/delegate"
+    revoke = run_path + "/revoke-delegation"
+    assert reviewer.call(candidates)["reviewers"] == [{"id": delegate_id, "display_name": "payroll-delegate"}]
+    assert reviewer.call(candidates + f"?after={delegate_id}")["reviewers"] == []
+    maker.call(candidates, status=403)
+    manager.call(candidates, status=404)
+    employee.call(candidates, status=404)
+    assignment = {"version": submitted["version"], "delegate_id": delegate_id, "hours": 2, "notes": "Independent review cover"}
+    assert reviewer.call(assign, {**assignment, "delegate_id": maker_id}, key="delegate-to-maker", status=403)["error"] == "payroll_reviewer_must_differ"
+    assert reviewer.call(assign, {**assignment, "delegate_id": reviewer_id}, key="delegate-to-self", status=422)["error"] == "payroll_delegate_must_differ"
+    assert reviewer.call(assign, {**assignment, "delegate_id": manager.account_id}, key="delegate-to-manager", status=404)["error"] == "payroll_reviewer_not_found"
+    first = reviewer.call(assign, assignment, key="delegate-first")
+    assert reviewer.call(assign, assignment, key="delegate-first") == first
+    assert delegate.call(run_path)["delegation"]["id"] == first["delegation_id"]
+    assert reviewer.call(assign, assignment, key="delegate-stale", status=409)["error"] == "payroll_delegation_conflict"
+    revoke_input = {**assignment, "previous_delegation_id": first["delegation_id"], "notes": "Cover reassigned"}
+    assert delegate.call(revoke, revoke_input, key="revoke-wrong-person", status=403)["error"] == "payroll_delegation_grantor_required"
+    assert reviewer.call(revoke, revoke_input, key="revoke-first")["state"] == "revoked"
+    old_return = {**close, "decision_ref": "RETURN-1", "delegation_id": first["delegation_id"]}
+    assert delegate.call(run_path + "/return", old_return, key="revoked-return", status=409)["error"] == "payroll_delegation_conflict"
+    second = reviewer.call(assign, assignment, key="delegate-second")
+    assert second["delegation_id"] != first["delegation_id"]
+    assert delegate.call(run_path + "/return", old_return, key="superseded-return", status=409)["error"] == "payroll_delegation_conflict"
+    return_payload = {**old_return, "delegation_id": second["delegation_id"]}
+    assert reviewer.call(run_path + "/return", return_payload, key="wrong-operator-return", status=403)["error"] == "payroll_delegate_required"
+    returned = delegate.call(run_path + "/return", return_payload, key="return")
+    assert returned["state"] == "calculated" and returned["granted_by"] == reviewer_id
+    assert delegate.call(run_path + "/return", return_payload, key="return") == returned
     submitted = maker.call(run_path + "/submit", {**author, "version": returned["version"], "decision_ref": "SUBMIT-3"}, key="submit-again")
     close = {**close, "version": submitted["version"]}
-    closed = reviewer.call(run_path + "/close", close, key="close")
+    assert delegate.call(run_path + "/close", {**close, "delegation_id": second["delegation_id"]}, key="wrong-version-close", status=409)["error"] == "payroll_delegation_conflict"
+    third_assignment = reviewer.call(assign, {**assignment, "version": submitted["version"]}, key="delegate-third")
+    close = {**close, "delegation_id": third_assignment["delegation_id"]}
+    closed = delegate.call(run_path + "/close", close, key="close")
     assert closed["state"] == "closed" and len(closed["digest"]) == 64
-    assert reviewer.call(run_path + "/close", close, key="close") == closed
+    assert delegate.call(run_path + "/close", close, key="close") == closed
+    reviews = {event["action"]: event for event in reviewer.call(run_path)["review_events"]}
+    assert reviews["return"]["actor_id"] == reviews["close"]["actor_id"] == delegate_id
+    assert reviews["return"]["granted_by"] == reviews["close"]["granted_by"] == reviewer_id
+    assert reviews["return"]["delegation_id"] == second["delegation_id"]
+    assert reviews["close"]["delegation_id"] == third_assignment["delegation_id"]
+    assert reviewer.call(run_path)["closure"]["closed_by"] == delegate_id
     assert reviewer.call(run_path + "/verify-closure") == {"run_id": run["run_id"], "digest": closed["digest"], "valid": True}
     assert employee.call(payroll + "/my-payslips")["payslips"] == []
     assert maker.call(run_path + "/trial", {**trial, "version": closed["version"]}, key="retry-closed", status=409)["error"] == "payroll_run_conflict"
@@ -1018,9 +1070,32 @@ def run(origin, group):
     recruiter.call(next_position + "/requisitions", status=404)
     admin.call(next_position + f"/requisitions/{req}", status=404)
     admin.call(next_position + "/budgets", {"starts_on": "2026-04-01", "ends_before": "2026-05-01", "capacity": 1}, key="cap-finance")
+    _, planning = create_login(admin, origin, company, credentials, "payroll-planner", "payroll_maker")
+    cost_period = planning.call(
+        company + "/payroll/runs", {"period_start": "2026-06-01"}, key="impact-period", status=201,
+    )["run_id"]
+    planned = admin.call(employment_path + "/shifts", {
+        "workday": "2026-04-17", "starts_at": "2026-04-17T09:00:00+08:00", "ends_at": "2026-04-17T17:00:00+08:00",
+    }, key="impact-shift", status=201)
     transfer = admin.call(employment_path + "/transfers", cutover, key="transfer")
     assert transfer["previous"] == {"from": "2026-04-01", "until": "2026-04-16", "department_id": department_id}
     assert transfer["next"] == {"from": "2026-04-16", "until": None, "department_id": finance}
+    shifts, costs = transfer["impact"]["shifts"], transfer["impact"]["cost_periods"]
+    assert [(row["id"], row["workday"]) for row in shifts] == [(planned["shift_id"], "2026-04-17")]
+    assert costs == [{"id": cost_period, "period_start": "2026-06-01", "period_end": "2026-07-01", "state": "draft"}]
+    impact = employment_path + f"/transfer-impact?assignment_id={transfer['assignment_id']}"
+    assert admin.call(impact + "&kind=shifts") == {"shifts": shifts}
+    assert admin.call(impact + "&kind=cost_periods") == {"cost_periods": costs}
+    assert admin.call(impact + f"&kind=shifts&after={planned['shift_id']}") == {"shifts": []}
+    recruiter.call(impact + "&kind=shifts", status=404)
+    planning.call(impact + "&kind=cost_periods", status=404)
+    admin.call(
+        f"{company}/attendance/shifts/{planned['shift_id']}/resolution",
+        {"version": 1, "state": "cancelled", "decision_ref": "CANCEL-IMPACT-SHIFT", "explanation": "Planning scenario complete"},
+        key="cancel-impact-shift",
+    )
+    assert admin.call(impact + "&kind=shifts") == {"shifts": []}
+    assert admin.call(employment_path + "/transfers", cutover, key="transfer") == transfer
     previous_day = admin.call(employment_path + "?on=2026-04-15")
     next_day = admin.call(employment_path + "?on=2026-04-16")
     assert (previous_day["department_id"], previous_day["position_title"], previous_day["effective_until"]) == (department_id, "Coordinator", "2026-04-16")

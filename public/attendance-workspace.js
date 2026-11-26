@@ -18,6 +18,7 @@ const problems = {
     outside_schedule: "打卡超出排班窗口", duration_exceeds_day: "工时超过 24 小时", shift_overlap: "班次时间重叠",
     shift_must_start_on_workday: "班次开始日与归属工作日不一致", workday_outside_employment: "工作日不在任职期间",
     shift_not_found: "班次不可见或不存在", employment_not_found: "任职不可见或不存在",
+    line_not_found: "该行不存在",
 };
 const text = (code) => states[code] ?? code;
 const reason = (code) => problems[code] ?? text(code);
@@ -208,9 +209,12 @@ async function certifications(ctx, route, root) {
     return [personHeader(route), history, panel("确认考勤供薪资使用", confirm, blockers)];
 }
 
-async function imports(ctx, id) {
+async function imports(ctx, route) {
     const root = `${ctx.base}/attendance/imports`;
-    if (id) return importDetail(ctx, id, `${root}/${id}`);
+    if (route) {
+        const id = route.id ?? route;
+        return importDetail(ctx, id, `${root}/${id}`, route.receipt);
+    }
     const list = await ctx.list("我的导入批次", root, "batches", ["批次", "类型", "行数", "创建时间", "操作"],
         (row) => [row.id, text(row.kind), row.row_count, row.created_at, button("打开批次", () => ctx.go(row.id))], "暂无导入批次。");
     const draft = memo("导入行（JSON 数组）", "rows");
@@ -259,7 +263,7 @@ async function imports(ctx, id) {
     return [list, panel("创建导入批次", hint, submit, example)];
 }
 
-async function importDetail(ctx, id, path) {
+async function importDetail(ctx, id, path, receipt) {
     const report = await ctx.request(path);
     if (ctx.current()) ctx.tools(button("返回导入列表", () => ctx.go()));
     const rows = report.rows.map((row) => [row.line_no, row.row_ref, text(row.state), row.attempts,
@@ -268,15 +272,38 @@ async function importDetail(ctx, id, path) {
         ["类型", text(report.import.kind)], ["待处理", report.counts.pending],
         ["已成功", report.counts.succeeded], ["失败", report.counts.failed],
     ])), panel("逐行结果", table(["行号", "行标识", "状态", "尝试次数", "班次编号或失败原因"], rows))];
-    const commands = [];
-    if (report.counts.pending) commands.push(["run", "继续处理待处理行"]);
-    if (report.counts.failed) commands.push(["retry", "继续并重试失败行", true]);
-    if (commands.length) {
+    if (receipt) {
+        menu.push(panel("本次重试回执", table(["所选行", "结果", "原因或班次编号"], receipt.results.map((row) => {
+            const error = row.reason ?? row.outcome?.error;
+            return [row.line_no, row.state === "rejected" ? "已拒绝" : text(row.state),
+                error ? reason(error) : row.outcome?.shift_id ?? "—"];
+        }))));
+    }
+    if (report.counts.pending) {
         const run = ctx.form([
             number("每次最多行数", "limit", { max: 25, value: 25 }), number("从行号之后继续", "after_row", { min: 0, max: 100, value: 0 }),
-        ], commands, (action, body) => ctx.request(`${path}/run`, { ...body, retry_failed: action === "retry" }),
+        ], [["run", "继续处理待处理行"]], (_, body) => ctx.request(`${path}/run`, body),
         () => ctx.go(id, "已更新逐行处理结果。"));
         menu.push(panel("分批执行", run));
+    }
+    const failed = report.rows.filter((row) => row.state === "failed");
+    if (failed.length) {
+        const options = node("fieldset", null, "wide import-retry");
+        options.append(node("legend", "选择失败行（单次最多 25 行）"));
+        for (const row of failed) {
+            const label = field(`第 ${row.line_no} 行 · ${row.row_ref} · ${reason(row.outcome.error)}`,
+                String(row.line_no), { type: "checkbox", required: false });
+            label.querySelector("input").checked = receipt?.line_nos.includes(row.line_no) ?? false;
+            options.append(label);
+        }
+        const retry = ctx.form([options], [["retry", "重试所选行"]], (_, body, key) => {
+            const selected = Object.keys(body).map(Number);
+            if (!selected.length || selected.length > 25) {
+                throw Object.assign(new Error(), { code: "invalid_attendance_retry_selection" });
+            }
+            return ctx.request(`${path}/retry`, { line_nos: selected }, key);
+        }, (result) => ctx.go({ id, receipt: result }, "所选行已处理。"));
+        menu.push(panel("重试导入", retry));
     }
     return menu;
 }

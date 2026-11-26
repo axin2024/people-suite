@@ -41,19 +41,38 @@ async function directory(ctx, record) {
             atDate ? facts([["岗位", `${atDate.position_code} · ${atDate.position_title}`], ["部门", atDate.department_name],
                 ["版本", atDate.version], ["开始日", atDate.effective_from], ["截止日（不含）", atDate.effective_until]])
                 : empty("该日期没有有效任职。")),
-        panel("岗位生效历史", table(["版本", "岗位", "部门", "起始日期", "截止日（不含）"],
+        panel("岗位生效历史", table(["版本", "岗位", "部门", "起始日期", "截止日（不含）", "调岗影响"],
             assignments.map((row) => [row.version, `${row.position_code} · ${row.position_title}`,
-                row.department_name, row.effective_from, row.effective_until]))),
+                row.department_name, row.effective_from, row.effective_until, row.version > 1
+                    ? button("查看排班与成本期间", () => ctx.go({ id, on: row.effective_from, impact: row.id })) : "—"]))),
         panel("合同版本", table(["版本", "合同编号", "生效日期", "约定截止日（不含）", "月工资"],
             contracts.map((row) => [row.version, row.reference, row.effective_from, row.ends_before, money(ctx.company, row.monthly_minor)]))),
         outgoing,
     ];
+    if (record.impact) result.push(...await transferImpact(ctx, path, record.impact, record.receipt));
     if (!employment.ends_before) {
         const route = { id, on };
         result.push(renew(ctx, route, path, contracts.at(-1)), ...transferForms(ctx, route, path, employment, assignments.at(-1)),
             offboarding(ctx, id, employment.assignment_version));
     }
     return result;
+}
+
+async function transferImpact(ctx, path, assignment, receipt) {
+    const source = `${path}/transfer-impact?assignment_id=${assignment}`;
+    const localTime = new Intl.DateTimeFormat("zh-CN", {
+        timeZone: ctx.company.timezone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    });
+    return Promise.all([
+        ctx.list("受调岗影响的排班", source + "&kind=shifts", "shifts", ["班次编号", "归属工作日", "开始", "结束"],
+            (row) => [row.id, row.workday, localTime.format(row.starts_at * 1000), localTime.format(row.ends_at * 1000)],
+            "该任职区间暂无相关班次。", { first: receipt }),
+        ctx.list("受调岗影响的成本期间", source + "&kind=cost_periods", "cost_periods", ["账期编号", "开始日", "截止日（不含）", "处理方式"],
+            (row) => [row.id, row.period_start, row.period_end,
+                ["closed", "published"].includes(row.state) ? "已封账，使用追溯补差" : "核对任职分摊，必要时重新试算"],
+            "该任职区间暂无相关账期。", { first: receipt }),
+    ]);
 }
 
 function assignmentLookup(ctx, id, on) {
@@ -116,7 +135,7 @@ function transferForms(ctx, route, path, employment, assignment) {
     const transfer = ctx.form([
         effective, number("目标岗位编号", "position_id", { list: positions.id }),
     ], [["transfer", "确认法人内调岗"]], submit("transfers", within),
-    (result) => ctx.go({ ...route, on: result.next.from },
+    (result) => ctx.go({ ...route, on: result.next.from, impact: result.assignment_id, receipt: result.impact },
         `已登记 ${result.next.from} 生效的调岗。请复核 ${result.schedule_review_from} 起的排班和 ${result.cost_recalculation_from} 账期成本。`),
     reportConflict(within));
     const legal = ctx.form([

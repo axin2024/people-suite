@@ -25,9 +25,9 @@ $recruitment = new Recruitment($db, $operations, $organization);
 $leave = new Leave($db, $operations, new WorkforceAccess($db, $operations));
 
 $mode = $argv[1] ?? '';
-if (in_array($mode, ['accept', 'leave'], true)) {
+if (in_array($mode, ['accept', 'leave', 'budget','move'], true)) {
     [$group, $company, $object, $index, $key, $barrier] = array_slice($argv, 2);
-    $actor = $accounts->authenticate($group, 'admin@example.test', DEMO_PASSWORD);
+    $actor = $accounts->authenticate($group, $mode==='budget'?'finance@example.test':'admin@example.test', DEMO_PASSWORD);
     $deadline = microtime(true) + 15;
     touch($barrier . '-' . $index);
     while (!is_file($barrier)) {
@@ -39,6 +39,9 @@ if (in_array($mode, ['accept', 'leave'], true)) {
     }
     try {
         $result = match ($mode) {
+            'move' => reserveMoveFixture($db,$operations,$actor,(int)$company,(int)$index,$key),
+            'budget' => (new PeopleSuite\WorkforceBudgets($db,$operations))->change($actor,(int)$company,(int)$index,'approve',$key,
+                ['budget_rev'=>2,'reason'=>'Validate the last available headcount']),
             'accept' => $recruitment->decide($actor, (int) $company, (int) $object, (int) $index, 'accept', $key, [
                 'version' => 2, 'decision_ref' => $key,
             ]),
@@ -89,6 +92,7 @@ $p1 = $organization->createPosition($actor, $alpha, 'shift', $job);
 $p2 = $organization->createPosition($actor, $alpha, 'planning', [...$job, 'code' => 'PLAN', 'title' => 'Planner']);
 $position = $p1['position_id'];
 $second = $p2['position_id'];
+require __DIR__.'/workforce-budgets.php';
 $rev = $organization->revisePosition($actor, $alpha, $position, 'revise-shift', [
     ...$job, 'revision_id' => $p1['revision_id'], 'title' => 'Shift lead', 'effective_from' => '2026-04-10', 'active' => true,
 ]);
@@ -180,6 +184,8 @@ $intake = (new Employment($db, $operations, $organization))->onboard($actor, $al
     'version' => 3, 'employee_code' => 'RACE-EMP', 'contract_ref' => 'RACE-CONTRACT',
 ]);
 $employmentId = $intake['employment_id'];
+require __DIR__.'/internal-market.php';
+require __DIR__.'/internal-moves.php';
 $leave->grant($actor, $alpha, $employmentId, 'grant-race', [
     'kind' => 'annual', 'year' => 2026, 'minutes' => 480, 'decision_ref' => 'ANNUAL-RACE',
 ]);
@@ -272,4 +278,13 @@ function raceRequests(string $mode, string $group, int $company, int $object, ar
         }
     }
     return $results;
+}
+
+function reserveMoveFixture($db,$ops,$actor,int $company,int $application,string $key): array
+{
+    $db->run("SET timestamp=UNIX_TIMESTAMP('2027-06-15 03:00:00')");
+    $job=$db->row('SELECT o.position_id,a.employment_id FROM internal_applications a JOIN internal_openings o ON o.id=a.opening_id WHERE a.id=?',[$application]);
+    $source=$db->row('SELECT position_id FROM assignments WHERE employment_id=? ORDER BY version DESC LIMIT 1',[$job['employment_id']]);
+    return (new PeopleSuite\InternalMoves($db,$ops))->reserve($actor,$company,$key,['application_id'=>$application,'offer_rev'=>2,
+        'from_position'=>$source['position_id'],'to_position'=>$job['position_id'],'effective_date'=>'2027-07-01']);
 }

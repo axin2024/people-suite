@@ -31,6 +31,7 @@ final class Organization
                 [$actor->groupId, $code, $name, $timezone, $currency],
             );
             $this->operations->audit($actor, $id, 'company', $id, 'company.created');
+            $this->db->run("INSERT INTO workforce_rollouts (group_id,company_id,state) VALUES (?,?,'active')",[$actor->groupId,$id]);
             return ['company_id' => $id];
         });
     }
@@ -162,7 +163,8 @@ final class Organization
                 return ['on' => $on, 'budget' => null, 'occupied' => null, 'available' => null];
             }
             $tomorrow = (new \DateTimeImmutable($on))->modify('+1 day')->format('Y-m-d');
-            $occupied = count($this->headcountIntervals($scope, $on, $tomorrow, (int) $budget['id']));
+            $occupiedBp = array_sum(array_column($this->headcountIntervals($scope, $on, $tomorrow, (int) $budget['id']), 'fte_bp'));
+            $occupied = $occupiedBp / 10000;
             return ['on' => $on, 'budget' => $budget, 'occupied' => $occupied, 'available' => (int) $budget['capacity'] - $occupied];
         }, repeatableRead: true);
     }
@@ -304,7 +306,9 @@ final class Organization
         string $start,
         ?int $offer = null,
         ?string $end = null,
+        int $fteBp = 10000,
     ): int {
+        Input::integer($fteBp,'fte_bp',1,10000);
         $this->lockPosition($actor, $company, $position);
         $this->activeRevision($actor, $company, $position, $start);
         $budget = $this->db->row(
@@ -329,19 +333,24 @@ final class Organization
             throw new BusinessError(409, 'position_inactive', ['effective_on' => $retired['effective_from']]);
         }
         $scope = [$actor->groupId, $company, $position];
-        $this->checkCapacity($scope, $start, $until, (int) $budget['capacity'], 1, (int) $budget['id']);
-        return $this->db->insert(
+        $this->checkCapacity($scope, $start, $until, (int) $budget['capacity'], $fteBp, (int) $budget['id']);
+        $slot = $this->db->insert(
             'INSERT INTO headcount_slots (group_id, company_id, position_id, budget_id, offer_id, starts_on, ends_before)
              VALUES (?, ?, ?, ?, ?, ?, ?)',
             [...$scope, $budget['id'], $offer, $start, $until],
         );
+        if ($fteBp !== 10000) {
+            $this->db->run('INSERT INTO headcount_slot_workloads (group_id,company_id,position_id,slot_id,fte_bp) VALUES (?,?,?,?,?)',
+                [...$scope,$slot,$fteBp]);
+        }
+        return $slot;
     }
 
     public function checkFutureAssignment(Access $actor, int $company, int $position, int $slot): void
     {
         $scope = [$actor->groupId, $company, $position];
         $period = $this->db->row(
-            'SELECT b.ends_before FROM headcount_slots s JOIN headcount_budgets b
+            'SELECT b.ends_before,COALESCE(f.fte_bp,10000) fte_bp FROM headcount_slots s LEFT JOIN headcount_slot_workloads f ON f.slot_id=s.id JOIN headcount_budgets b
                ON b.group_id=s.group_id AND b.company_id=s.company_id AND b.position_id=s.position_id AND b.id=s.budget_id
              WHERE s.group_id=? AND s.company_id=? AND s.position_id=? AND s.id=?',
             [...$scope, $slot],
@@ -353,7 +362,7 @@ final class Organization
         );
         foreach ($budgets as $budget) {
             $this->checkCapacity(
-                $scope, $budget['starts_on'], $budget['ends_before'], (int) $budget['capacity'], 1, (int) $budget['id'],
+                $scope, $budget['starts_on'], $budget['ends_before'], (int) $budget['capacity'], (int)$period['fte_bp'], (int) $budget['id'], $slot,
             );
         }
     }
@@ -363,21 +372,22 @@ final class Organization
         string $start,
         string $until,
         int $capacity,
-        int $incoming,
+        int $incomingBp,
         int $budgetId = 0,
+        int $excludePendingSlot = 0,
     ): void {
         $events = [$start => 0];
-        foreach ($this->headcountIntervals($scope, $start, $until, $budgetId) as $slot) {
+        foreach ($this->headcountIntervals($scope, $start, $until, $budgetId, $excludePendingSlot) as $slot) {
             $from = max($start, $slot['starts_on']);
             $to = min($until, $slot['ends_before'] ?? $until);
-            $events[$from] = ($events[$from] ?? 0) + 1;
-            $events[$to] = ($events[$to] ?? 0) - 1;
+            $events[$from] = ($events[$from] ?? 0) + $slot['fte_bp'];
+            $events[$to] = ($events[$to] ?? 0) - $slot['fte_bp'];
         }
         ksort($events, SORT_STRING);
         $occupied = 0;
         foreach ($events as $on => $change) {
             $occupied += $change;
-            if ($on < $until && $occupied + $incoming > $capacity) {
+            if ($on < $until && $occupied + $incomingBp > $capacity * 10000) {
                 throw new BusinessError(409, 'headcount_exhausted', [
                     'budget_id' => $budgetId ?: null, 'effective_on' => $on,
                 ]);
@@ -385,18 +395,24 @@ final class Organization
         }
     }
 
-    private function headcountIntervals(array $scope, string $start, string $until, int $budgetId): array
+    private function headcountIntervals(array $scope, string $start, string $until, int $budgetId,int $excludePendingSlot=0): array
     {
         return $this->db->rows(
-            'SELECT starts_on, ends_before FROM headcount_slots
-             WHERE group_id=? AND company_id=? AND position_id=? AND budget_id=? AND released_at IS NULL
+            'SELECT s.starts_on, s.ends_before, COALESCE(f.fte_bp,10000) fte_bp FROM headcount_slots s
+             LEFT JOIN headcount_slot_workloads f ON f.slot_id=s.id
+             WHERE s.group_id=? AND s.company_id=? AND s.position_id=? AND s.budget_id=? AND s.released_at IS NULL
                AND starts_on<? AND ends_before>?
              UNION ALL
-             SELECT a.effective_from AS starts_on, a.effective_until AS ends_before FROM assignments a
+             SELECT a.effective_from AS starts_on, a.effective_until AS ends_before, COALESCE(f.fte_bp,10000) fte_bp FROM assignments a
              JOIN headcount_slots s ON s.group_id=a.group_id AND s.company_id=a.company_id AND s.position_id=a.position_id AND s.id=a.slot_id
+             LEFT JOIN headcount_slot_workloads f ON f.slot_id=s.id
              WHERE a.group_id=? AND a.company_id=? AND a.position_id=? AND s.budget_id<>?
-               AND a.effective_from<? AND (a.effective_until IS NULL OR a.effective_until>?)',
-            [...$scope, $budgetId, $until, $start, ...$scope, $budgetId, $until, $start],
+               AND a.effective_from<? AND (a.effective_until IS NULL OR a.effective_until>?)
+             UNION ALL
+             SELECT m.effective_date,NULL,m.reserved_fte FROM internal_moves m JOIN headcount_slots s ON s.id=m.slot_id
+             WHERE m.group_id=? AND m.company_id=? AND m.to_position=? AND m.state IN (\'awaiting_signatures\',\'scheduled\')
+               AND s.budget_id<>? AND m.effective_date<? AND m.slot_id<>?',
+            [...$scope, $budgetId, $until, $start, ...$scope, $budgetId, $until, $start,...$scope,$budgetId,$until,$excludePendingSlot],
         );
     }
 

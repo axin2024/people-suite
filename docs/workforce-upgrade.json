@@ -1,0 +1,92 @@
+{
+  "previous_tag": "v1.1.0",
+  "previous_commit": "02237f9f0abac50ca2fc19a482f0e562632edcf0",
+  "migrations": [
+    "016_workforce_scenarios",
+    "017_workforce_budgets",
+    "018_skill_evidence",
+    "019_internal_market",
+    "020_fractional_headcount",
+    "021_internal_moves",
+    "022_workforce_rollout"
+  ],
+  "checkpoint": {
+    "state": "setup",
+    "last_revision_id": 1,
+    "copied": 1,
+    "remaining_baseline": 1,
+    "pending": {
+      "budgets": [],
+      "reviews": [],
+      "applications": [],
+      "moves": []
+    }
+  },
+  "resumed": {
+    "checkpoint": {
+      "state": "setup",
+      "last_revision_id": 1,
+      "copied": 0,
+      "remaining_baseline": 1,
+      "pending": {
+        "budgets": [],
+        "reviews": [],
+        "applications": [],
+        "moves": []
+      }
+    },
+    "batch": {
+      "state": "setup",
+      "last_revision_id": 2,
+      "copied": 1,
+      "remaining_baseline": 0,
+      "pending": {
+        "budgets": [],
+        "reviews": [],
+        "applications": [],
+        "moves": []
+      }
+    },
+    "receipt": {
+      "scenario_id": 1,
+      "revision": 1,
+      "entries": 1,
+      "currency": "CNY"
+    },
+    "state": {
+      "state": "draining",
+      "last_revision_id": 2,
+      "copied": 0,
+      "remaining_baseline": 0,
+      "pending": {
+        "budgets": [],
+        "reviews": [],
+        "applications": [],
+        "moves": []
+      }
+    }
+  },
+  "legacy": {
+    "counts": {
+      "positions": 2,
+      "position_revisions": 2,
+      "headcount_slots": 2,
+      "assignments": 2,
+      "payroll_closures": 2,
+      "payslip_segments": 3
+    },
+    "conflicts": [],
+    "closure_digests": [
+      {
+        "run_id": 1,
+        "digest": "93904d1250caefc36f700c1d70b3814447a4ded6b340422aab1a30c6222ecf68"
+      },
+      {
+        "run_id": 2,
+        "digest": "96d92bcf180c55d96e8c09b3386f3e8f77b05db509c7a13f3c92535b1a20dcab"
+      }
+    ],
+    "occupancy_digest": "6ba3ba0f0efa5a89d67161d70a654f8c85efc13a13e2b9d0f0c0b938a11ca0d5"
+  },
+  "restored_match": true
+}

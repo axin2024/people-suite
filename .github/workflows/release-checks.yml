@@ -24,6 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: shivammathur/setup-php@v2
         with:
@@ -46,8 +47,14 @@ jobs:
       - name: Verify HTTP, database transactions and payroll capacity
         run: |
           python3 tests/http_smoke.py http://127.0.0.1:8088
-          php tests/recruitment.php
+          HCM_MOVE_EVIDENCE=storage/mobility.json php tests/recruitment.php
+          php -d memory_limit=512M tests/workforce-capacity.php
           php -d memory_limit=256M tests/payroll_capacity.php 1000
+      - name: Read the mobility handover and sealed periods in Chromium
+        run: |
+          python3 -m venv "$RUNNER_TEMP/hcm-browser"
+          "$RUNNER_TEMP/hcm-browser/bin/pip" install playwright
+          "$RUNNER_TEMP/hcm-browser/bin/python" tests/mobility_workbench.py http://127.0.0.1:8088 storage/mobility.json --chrome "$(command -v google-chrome)"
       - name: Verify a public demo on empty and restored databases
         run: |
           docker compose exec -T db sh -ec 'export MYSQL_PWD="$MYSQL_ROOT_PASSWORD"; exec mysql -uroot' <<'SQL'
@@ -58,10 +65,19 @@ jobs:
           SQL
 
           export HCM_DSN='mysql:host=127.0.0.1;port=33126;dbname=hcm_demo_ci;charset=utf8mb4'
-          php bin/hcm.php migrate
           demo() { printf '%s\n' 'ci-demo-only-local' | php bin/hcm.php "$1"; }
-          demo demo-seed
-          demo demo-finish > storage/initial.json
+          upgrade() { printf '%s\n' 'ci-demo-only-local' | php tests/workforce-upgrade.php "$1"; }
+          mkdir -p "$RUNNER_TEMP/hcm-previous"
+          git archive v1.1.0 | tar -x -C "$RUNNER_TEMP/hcm-previous"
+          (cd "$RUNNER_TEMP/hcm-previous" && php bin/hcm.php migrate && demo demo-seed)
+          (cd "$RUNNER_TEMP/hcm-previous" && demo demo-finish) > storage/initial.json
+          upgrade preflight > storage/preflight.json
+          php bin/hcm.php migrate
+          upgrade checkpoint
+          upgrade resume
+          upgrade readback > storage/migrated.json
+          upgrade preflight > storage/after.json
+          cmp storage/preflight.json storage/after.json
           demo demo-finish > storage/replayed.json
           demo demo-check > storage/readback.json
           cmp storage/initial.json storage/replayed.json
@@ -73,6 +89,8 @@ jobs:
           php bin/hcm.php health
           demo demo-check > storage/restored.json
           cmp storage/initial.json storage/restored.json
+          upgrade readback > storage/restored-workforce.json
+          cmp storage/migrated.json storage/restored-workforce.json
           cat storage/restored.json
       - name: Read service logs on failure
         if: failure()

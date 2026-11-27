@@ -58,6 +58,12 @@ final class HttpApi
             return [$ready ? 200 : 503, ['ready' => $ready]];
         }
 
+        if ($path==='/internal-moves') {
+            if ($method!=='POST') throw new BusinessError(405,'method_not_allowed');
+            $company=Input::integer($_GET['company_id'] ?? null,'company_id');
+            $path='/api/companies/'.$company.'/talent/moves';
+        }
+
         if (!str_starts_with($path, '/api/')) {
             throw new BusinessError(404, 'route_not_found');
         }
@@ -155,6 +161,63 @@ final class HttpApi
         }
         $company = Input::integer($match[1], 'company_id');
         $resource = $match[2];
+        if ($method==='GET' && $resource==='workforce/movements') {
+            return [200,(new MovementReport($this->db))->month($actor,$company,Input::date($_GET['period'] ?? null,'period'))];
+        }
+        if ($method==='GET' && $resource==='workforce/scenarios') {
+            return [200,(new WorkforcePlans($this->db,$this->operations))->register($actor,$company,Input::integer($_GET['after'] ?? 0,'after',0))];
+        }
+        if ($method === 'POST' && $resource === 'workforce/scenarios') {
+            if (isset($input['csv'])) {
+                $actor->company($company,'hr');
+                $csv = Input::text($input['csv'],'csv',65000);
+                $stream = fopen('php://temp','w+');
+                try {
+                    fwrite($stream,$csv);
+                    rewind($stream);
+                    $input['entries'] = WorkforcePlans::readCsv($stream);
+                } finally {
+                    fclose($stream);
+                }
+                unset($input['csv']);
+            }
+            return [201,(new WorkforcePlans($this->db,$this->operations))->publish($actor,$company,$this->requestKey(),$input)];
+        }
+        if ($method==='GET' && preg_match('#^workforce/scenarios/([0-9]+)/variance$#D',$resource,$plan)) {
+            return [200,(new WorkforcePlans($this->db,$this->operations))->comparison($actor,$company,Input::integer($plan[1],'scenario_id'))];
+        }
+        if ($method === 'GET' && preg_match('#^workforce/scenarios/([0-9]+)$#D',$resource,$plan)) {
+            return [200,(new WorkforcePlans($this->db,$this->operations))->detail($actor,$company,Input::integer($plan[1],'scenario_id'))];
+        }
+        if (str_starts_with($resource,'talent/')) {
+            return $this->talent($actor,$company,$method,substr($resource,7),$input);
+        }
+        if (str_starts_with($resource,'workforce/budget')) {
+            $budget = new WorkforceBudgets($this->db,$this->operations);
+            if ($resource==='workforce/budgets') {
+                if ($method==='GET') {
+                    return [200,$budget->board($actor,$company,Input::integer($_GET['after'] ?? 0,'after',0))];
+                }
+                if ($method==='POST') {
+                    return [201,$budget->submit($actor,$company,$this->requestKey(),$input)];
+                }
+            }
+            if ($method==='POST' && $resource==='workforce/budget-limits') {
+                return [200,$budget->limits($actor,$company,$this->requestKey(),$input)];
+            }
+            if ($method==='POST' && $resource==='workforce/budget-managers') {
+                return [200,$budget->assign($actor,$company,$this->requestKey(),$input)];
+            }
+            if (preg_match('#^workforce/budgets/([0-9]+)(?:/(review|approve|return|revise))?$#D',$resource,$route)) {
+                $id = Input::integer($route[1],'request_id');
+                if ($method==='GET' && !isset($route[2])) {
+                    return [200,$budget->detail($actor,$company,$id)];
+                }
+                if ($method==='POST' && isset($route[2])) {
+                    return [200,$budget->change($actor,$company,$id,$route[2],$this->requestKey(),$input)];
+                }
+            }
+        }
         if ($method === 'GET' && $resource === 'departments') {
             return [200, ['departments' => $this->organization->departments(
                 $actor, $company, Input::date($_GET['on'] ?? null, 'on'),
@@ -673,6 +736,52 @@ final class HttpApi
             throw new BusinessError(400, 'invalid_json_object');
         }
         return $value;
+    }
+
+    private function talent(Access $actor,int $company,string $method,string $path,array $input): array
+    {
+        $skills=new TalentSkills($this->db,$this->operations);
+        $market=new InternalMarket($this->db,$this->operations);
+        $after=Input::integer($_GET['after'] ?? 0,'after',0);
+        $moves=new InternalMoves($this->db,$this->operations);
+        if ($method==='GET' && $path==='moves') return [200,$moves->board($actor,$company,$after)];
+        if ($method==='GET' && $path==='offers') return [200,$moves->offers($actor,$company,$after)];
+        if ($method==='GET' && preg_match('#^offers/([0-9]+)$#D',$path,$m)) return [200,$moves->preview($actor,$company,Input::integer($m[1],'application_id'),Input::date($_GET['effective_date'] ?? null,'effective_date'))];
+        if ($method==='GET' && preg_match('#^moves/([0-9]+)$#D',$path,$m)) return [200,$moves->detail($actor,$company,Input::integer($m[1],'move_id'))];
+        if ($method==='POST' && $path==='moves') return [201,$moves->reserve($actor,$company,$this->requestKey(),$input)];
+        if ($method==='POST' && preg_match('#^moves/([0-9]+)/(source-sign|target-sign|contract|withdraw|release-blocked|handover-complete|apply)$#D',$path,$m)) {
+            $id=Input::integer($m[1],'move_id');
+            if ($m[2]==='apply') {
+                $actor->company($company,'hr');
+                return [200,$this->operations->once($actor,$company,'move.apply',$this->requestKey(),['move_id'=>$id],
+                    fn()=>$this->employment->applyReservedMove($actor,$company,$id))];
+            }
+            return [200,$moves->update($actor,$company,$id,$this->requestKey(),$m[2],$input)];
+        }
+        if ($method==='GET') {
+            if (in_array($path,['skills/mine','skills/review'],true)) {
+                return [200,$skills->inbox($actor,$company,substr($path,7),$after)];
+            }
+            if ($path==='skills/search') return [200,$skills->search($actor,$company,Input::code($_GET['skill'] ?? null,'skill'),$after)];
+            if (in_array($path,['market','panel'],true)) return [200,$market->listing($actor,$company,$path,$after)];
+            if ($path==='applications') return [200,$market->mine($actor,$company,$after)];
+            if (preg_match('#^(market|panel)/([0-9]+)$#D',$path,$m)) {
+                $id=Input::integer($m[2],'opening_id');
+                return [200,$m[1]==='market'?$market->preview($actor,$company,$id):$market->candidates($actor,$company,$id,$after)];
+            }
+        }
+        if ($method==='POST') {
+            $key=$this->requestKey();
+            if ($path==='skills') return [201,$skills->add($actor,$company,$key,$input)];
+            if ($path==='openings') return [201,$market->post($actor,$company,$key,$input)];
+            if (preg_match('#^skills/([0-9]+)/(visibility|review)$#D',$path,$m)) {
+                return [200,$skills->change($actor,$company,Input::integer($m[1],'evidence_id'),$m[2],$key,$input)];
+            }
+            if (preg_match('#^market/([0-9]+)/apply$#D',$path,$m)) return [201,$market->apply($actor,$company,Input::integer($m[1],'opening_id'),$key,$input)];
+            if (preg_match('#^applications/([0-9]+)/score$#D',$path,$m)) return [200,$market->score($actor,$company,Input::integer($m[1],'application_id'),$key,$input)];
+            if (preg_match('#^applications/([0-9]+)/withdraw$#D',$path,$m)) return [200,$market->withdraw($actor,$company,Input::integer($m[1],'application_id'),$key,$input)];
+        }
+        throw new BusinessError(404,'route_not_found');
     }
 
     private function requestKey(): string

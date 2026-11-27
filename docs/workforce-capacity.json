@@ -1,0 +1,61 @@
+{
+    "at_utc": "2026-11-27T01:07:14+00:00",
+    "platform": "Windows NT AMD64",
+    "cpu": "Intel64 Family 6 Model 170 Stepping 4, GenuineIntel",
+    "php": "8.2.30",
+    "mysql": {
+        "version": "8.4.13",
+        "buffer_pool_bytes": 134217728
+    },
+    "fixture": {
+        "departments": 500,
+        "workers": 20000,
+        "months": 12,
+        "annual_currency": "CNY",
+        "input_format": "CSV"
+    },
+    "manager_visible_departments": 1,
+    "manager_company_cost_access": "denied",
+    "samples": [
+        {
+            "phase": "warmup",
+            "elapsed_ms": 1179.11,
+            "successful": 1,
+            "rejected": 0,
+            "timeouts": 0,
+            "department_months": 6000,
+            "cost_minor": 18000000000,
+            "monthly_rows_sha256": "f08fe2734aac785bcf16e30320fadcf41466b6730159da25db8825b44d19fe2b"
+        },
+        {
+            "phase": "measured",
+            "elapsed_ms": 965.61,
+            "successful": 1,
+            "rejected": 0,
+            "timeouts": 0,
+            "department_months": 6000,
+            "cost_minor": 18000000000,
+            "monthly_rows_sha256": "f08fe2734aac785bcf16e30320fadcf41466b6730159da25db8825b44d19fe2b"
+        },
+        {
+            "phase": "measured",
+            "elapsed_ms": 901.48,
+            "successful": 1,
+            "rejected": 0,
+            "timeouts": 0,
+            "department_months": 6000,
+            "cost_minor": 18000000000,
+            "monthly_rows_sha256": "f08fe2734aac785bcf16e30320fadcf41466b6730159da25db8825b44d19fe2b"
+        },
+        {
+            "phase": "measured",
+            "elapsed_ms": 887.35,
+            "successful": 1,
+            "rejected": 0,
+            "timeouts": 0,
+            "department_months": 6000,
+            "cost_minor": 18000000000,
+            "monthly_rows_sha256": "f08fe2734aac785bcf16e30320fadcf41466b6730159da25db8825b44d19fe2b"
+        }
+    ]
+}

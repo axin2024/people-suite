@@ -1,0 +1,135 @@
+{
+    "group": "test-923da3643dba",
+    "company_id": 1,
+    "source_manager": "dept-manager@example.test",
+    "initial_request": {
+        "application_id": 3,
+        "from_position": 1,
+        "to_position": 3,
+        "effective_date": "2027-07-01",
+        "offer_rev": 2
+    },
+    "initial_receipt": {
+        "move_id": 1,
+        "state": "awaiting_signatures",
+        "revision": 1,
+        "reserved_fte": 10000,
+        "effective_date": "2027-07-01",
+        "required_signers": [
+            "source_manager",
+            "target_manager"
+        ]
+    },
+    "withdrawn": {
+        "id": 1,
+        "group_id": 1,
+        "company_id": 1,
+        "application_id": 3,
+        "opening_id": 2,
+        "employee_id": 2,
+        "source_company_id": 1,
+        "source_employment_id": 2,
+        "source_assignment_id": 2,
+        "source_version": 1,
+        "from_position": 1,
+        "to_position": 3,
+        "source_department": 2,
+        "target_department": 3,
+        "effective_date": "2027-07-01",
+        "offer_rev": 2,
+        "slot_id": 4,
+        "reserved_fte": 10000,
+        "revision": 4,
+        "state": "withdrawn",
+        "result": null,
+        "created_by": 1,
+        "created_at": "2027-06-15 03:00:00.000000",
+        "employee_account": 7
+    },
+    "new_request": {
+        "application_id": 3,
+        "from_position": 1,
+        "to_position": 3,
+        "effective_date": "2027-07-01",
+        "offer_rev": 5
+    },
+    "new_receipt": {
+        "move_id": 2,
+        "state": "awaiting_signatures",
+        "revision": 1,
+        "reserved_fte": 10000,
+        "effective_date": "2027-07-01",
+        "required_signers": [
+            "source_manager",
+            "target_manager"
+        ]
+    },
+    "effective": {
+        "move_id": 2,
+        "state": "effective",
+        "effective_date": "2027-07-01",
+        "employment_id": 2,
+        "assignment_id": 3,
+        "assignment_version": 2,
+        "source_assignment_id": 2,
+        "source_department": 2,
+        "target_department": 3,
+        "reserved_fte": 10000
+    },
+    "handover": {
+        "owner_id": 3,
+        "checklist": "归档项目排班，向接手人移交设备清单",
+        "assigned_by": 3,
+        "completed_at": "2027-06-30 16:00:00.000000"
+    },
+    "june": [
+        {
+            "run_id": 1,
+            "digest": "e227aad902c6d3ffc27ab4e5d20feb203d955a168c050a0629b889559a2383c2",
+            "valid": true
+        },
+        [
+            {
+                "assignment_id": 2,
+                "department_id": 2,
+                "cost_minor": 900000,
+                "payslip_id": 2,
+                "line_no": 1
+            }
+        ]
+    ],
+    "july": [
+        {
+            "run_id": 2,
+            "digest": "9f84a27ebc622b844fb7834e6addcefd0bb7f637ee7f076e7faa99affe3f3a6c",
+            "valid": true
+        },
+        [
+            {
+                "assignment_id": 3,
+                "department_id": 3,
+                "cost_minor": 900000,
+                "payslip_id": 4,
+                "line_no": 1
+            }
+        ]
+    ],
+    "vacancy_june": {
+        "department_id": 3,
+        "department": "人才发展部",
+        "internal_fills": 0,
+        "external_fills": 0,
+        "assignments_ended": 0,
+        "vacant_days": 16,
+        "internal_fill_rate": null
+    },
+    "vacancy_july": {
+        "department_id": 3,
+        "department": "人才发展部",
+        "internal_fills": 1,
+        "external_fills": 0,
+        "assignments_ended": 0,
+        "vacant_days": 0,
+        "internal_fill_rate": 1
+    }
+}

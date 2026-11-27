@@ -1,0 +1,4 @@
+reference,department_id,effective_from,ends_before,fte_bp,monthly_cost_minor
+FULL-1,1,2027-01-01,2028-01-01,10000,1200000
+HALF-1,1,2027-01-01,2028-01-01,5000,600000
+HALF-2,1,2027-01-01,2028-01-01,5000,600000

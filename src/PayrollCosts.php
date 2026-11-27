@@ -50,6 +50,13 @@ final class PayrollCosts
         return ['period_start' => $start, 'companies' => $companies, 'totals_by_currency' => array_values($totals)];
     }
 
+    public function closedForPlanning(Access $actor,int $company,int $year): array
+    {
+        $actor->company($company,'hr','payroll_reviewer');
+        return $this->reports("r.group_id=? AND r.company_id=? AND r.period_start>=? AND r.period_start<? AND r.state IN ('closed','published')",
+            [$actor->groupId,$company,"$year-01-01",($year+1).'-01-01']);
+    }
+
     private function reports(string $filter, array $parameters): array
     {
         $rows = $this->db->rows(

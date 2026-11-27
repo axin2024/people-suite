@@ -136,6 +136,20 @@ def attendance_and_leave(admin, origin, credentials, company, employment):
     admin.call(
         employment + "/manager", {"account_id": manager_id, "effective_from": "2026-04-01"}, key="manager-link",
     )
+    talent = company + "/talent"
+    assert employee.call(talent + "/skills/mine")["items"] == []
+    certificate = employee.call(talent + "/skills", {"skill":"OPS", "title":"Operating permit", "evidence_ref":"CERT-27",
+        "reviewer_id":admin.account_id, "visibility":"private"}, key="skills-add", status=201)
+    sid = certificate["evidence_id"]
+    assert [r["id"] for r in admin.call(talent + "/skills/review")["items"]] == [sid]
+    admin.call(f"{talent}/skills/{sid}/review", {"revision":1,"decision":"verified","verified_until":"2099-12-31","notes":"Verified with issuer"}, key="skills-review")
+    employee.call(f"{talent}/skills/{sid}/visibility", {"revision":2,"visibility":"company"}, key="skills-share")
+    assert [r["id"] for r in admin.call(talent + "/skills/search?skill=OPS")["items"]] == [sid]
+    employee.call(f"{talent}/skills/{sid}/visibility", {"revision":3,"visibility":"private"}, key="skills-hide")
+    assert admin.call(talent + "/skills/search?skill=OPS")["items"] == []
+    manager.call(talent + "/skills/search?skill=OPS", status=404)
+    manager.call(employment, status=404)
+    assert employee.call(talent + "/market")["items"] == []
     workforce = company + "/attendance/workforce?workday=2026-04-15"
     employment_id = int(employment.rsplit("/", 1)[1])
     for session, role, is_self in [(admin, "hr", 0), (manager, "manager", 0), (employee, "employee", 1)]:
@@ -971,6 +985,20 @@ def run(origin, group):
         key="ops",
         status=201,
     )["department_id"]
+    plan_url = company + "/workforce/scenarios"
+    assert admin.call("/internal-moves?company_id=" + company.rsplit("/", 1)[1], {}, key="move-invalid", status=422)["details"]["field"] == "application_id"
+    base = {"department_id": department_id, "effective_from": "2027-01-01", "ends_before": "2028-01-01"}
+    entries = [dict(base, reference=ref, fte_bp=fte, monthly_cost_minor=cost)
+               for ref, fte, cost in [("FULL", 10000, 120000), ("HALF1", 5000, 60000), ("HALF2", 5000, 60000)]]
+    plan = {"year": 2027, "code": "BASE", "name": "Annual staffing", "previous_revision": 0, "entries": entries}
+    original = admin.call(plan_url, plan, key="plan-1", status=201)
+    assert admin.call(plan_url, plan, key="plan-1", status=201) == original
+    read_plan = lambda receipt: admin.call(plan_url + "/" + str(receipt["scenario_id"]))["months"]
+    assert [(m["monthly_fte_bp"], m["cost_minor"]) for m in read_plan(original)] == [(20000, 240000)] * 12
+    revision = dict(plan, previous_revision=1, entries=[*entries[:2],dict(entries[2], monthly_cost_minor=65000)])
+    corrected = admin.call(plan_url, revision, key="plan-2", status=201)
+    assert read_plan(original)[0]["cost_minor"] == 240000 and read_plan(corrected)[0]["cost_minor"] == 245000
+    admin.call(plan_url, revision, key="plan-stale", status=409)
     assert admin.call(company + "/departments?on=2026-04-16")["departments"][0]["id"] == department_id
     position_id = admin.call(
         company + "/positions",
@@ -1114,6 +1142,21 @@ def run(origin, group):
     ]
     actors = attendance_and_leave(admin, origin, credentials, company, employment_path)
     original_payroll = payroll_trial(admin, origin, credentials, company, employment_path, department_id, finance, actors)
+    csv_baseline = ("reference,department_id,effective_from,ends_before,fte_bp,monthly_cost_minor\n"
+                    f"OPS-APR,{department_id},2026-04-01,2026-05-01,10000,400000\n"
+                    f"FIN-APR,{finance},2026-04-16,2026-05-01,10000,300000\n")
+    historical_plan = admin.call(plan_url, {"year": 2026, "code": "COST", "name": "April costs",
+                                           "previous_revision": 0, "csv": csv_baseline}, key="april-cost-plan", status=201)
+    actuals = admin.call(f"{plan_url}/{historical_plan['scenario_id']}/variance")["months"]
+    april = {r["department_id"]: r for r in actuals if r["period_start"] == "2026-04-01"}
+    assert [april[d]["closed_cost_minor"] for d in (department_id, finance)] == [450000, 450000]
+    assert [april[d]["occupied_bp"] for d in (department_id, finance)] == [0, 10000]
+    assert april[department_id]["variance_cost_minor"] == 50000
+    assert april[finance]["variance_cost_minor"] == 450000 - april[finance]["planned_cost_minor"]
+    moves = admin.call(company + "/workforce/movements?period=2026-04-01")
+    counts = {d["department_id"]: d for d in moves["departments"]}
+    assert counts[department_id]["external_fills"] == 1 and counts[department_id]["assignments_ended"] == 1
+    assert counts[finance]["internal_fills"] == 1 and counts[finance]["internal_fill_rate"] == 1
     performance_cycle(admin, origin, company, credentials, employment_path, original_payroll, actors)
     certificate_path, certificate = employee_services(admin, company, employee["employment_id"], original_payroll, actors[0], department_id)
 

@@ -39,6 +39,12 @@ final class Operations
             if ($receipt['response'] !== null) {
                 return json_decode($receipt['response'], true, flags: JSON_THROW_ON_ERROR);
             }
+            if (in_array($scope[3],['workforce.publish','budget.submit','skill.add','opening.post','internal.apply','internal.reserve'],true)) {
+                (new WorkforceRollout($this->db))->admit($scope[0],$scope[1]);
+            }
+            if (in_array($scope[3],['position.create','position.revise'],true)) {
+                $this->db->row('SELECT state FROM workforce_rollouts WHERE group_id=? AND company_id=? FOR SHARE',[$scope[0],$scope[1]]);
+            }
             $result = $work();
             $this->db->run(
                 'UPDATE operation_receipts SET response=?

@@ -3,6 +3,8 @@ import { attendancePages } from "./attendance-workspace.js";
 import { employmentPages } from "./employment-workspace.js";
 import { payrollPages } from "./payroll-workspace.js";
 import { performancePages } from "./performance-workspace.js";
+import { talentPages } from "./talent-workspace.js";
+import { workforcePages } from "./workforce-workspace.js";
 import { recruitmentPages } from "./recruitment-workspace.js";
 
 const $ = (id) => document.getElementById(id);
@@ -15,6 +17,16 @@ const roles = { hr: "人事", recruiter: "招聘专员", manager: "直属主管"
 const taskNames = { HANDOVER: "业务交接", ACCESS: "权限与资源清点", EQUIPMENT: "设备归还确认", PAYROLL: "薪资结算确认" };
 const blockerKinds = { task: "交接清单", employee_request: "员工申请", leave: "请假", shift: "排班", payslip_inquiry: "工资核对" };
 const errors = {
+    workforce_intake_closed: "此法人尚未启用人才规划，或正在停止受理新请求。",
+    offer_or_opening_changed: "岗位或录用修订已变更，请重新预检。",
+    move_revision_changed: "调任单已有新进展，请刷新详情。",
+    move_budget_month_unfunded: "拟生效月尚未获得该岗位的预算额度。",
+    source_assignment_changed: "原任职已变更，请重新核对调任。",
+    employee_fte_exhausted: "生效后同时任职的全职当量超过上限。",
+    move_contract_conflict: "合同日期、编号或当前确认状态与本次调任冲突。",
+    receiving_contract_required: "请先由接收法人 HR 确认目标合同。",
+    move_ready_to_apply: "此调任可以正常生效，请使用办理生效操作。",
+    required_evidence_missing: "缺少生效日有效且已授权的必需技能凭据。",
     invalid_credentials: "集团代码、邮箱或密码有误。",
     offboarding_new_work_frozen: "离职交接期间暂停新增这类事项。",
     offboarding_clearance_incomplete: "仍有待处理事项，当前无法办结。",
@@ -224,6 +236,8 @@ async function paged(ctx, title, path, property, headers, cells, emptyText, opti
 const pages = [
     ...employmentPages,
     ...recruitmentPages,
+    ...workforcePages,
+    ...talentPages,
     ...payrollPages,
     { id: "offboarding", label: "离职交接", allow: (c) => c.archive || c.roles.some((role) => ["hr", "manager", "employee", "payroll_reviewer"].includes(role)), load: departures },
     { id: "employee-review", label: "员工申请审核", allow: (c) => c.roles.includes("hr"), load: (ctx, id) => requests(ctx, id, true) },

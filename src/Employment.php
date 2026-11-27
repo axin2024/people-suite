@@ -480,6 +480,67 @@ final class Employment
             AND effective_from<? AND (effective_until IS NULL OR effective_until>?)', [$until, ...$scope, $until, $until]);
     }
 
+    public function applyReservedMove(Access $actor,int $target,int $moveId): array
+    {
+        $actor->company($target,'hr');
+        return $this->db->transaction(function () use ($actor,$target,$moveId) {
+            $m=$this->db->row('SELECT * FROM internal_moves WHERE group_id=? AND company_id=? AND id=? FOR UPDATE',
+                [$actor->groupId,$target,$moveId]) ?? throw new BusinessError(404,'move_not_found');
+            if ($m['state']==='effective') return json_decode($m['result'],true,flags:JSON_THROW_ON_ERROR);
+            $date=$m['effective_date'];
+            if ($m['state']!=='scheduled' || $date>(new TalentSkills($this->db,$this->operations))->today($actor,$target)) {
+                throw new BusinessError(409,'move_not_due');
+            }
+            $source=$m['source_company_id'];
+            $employment=$m['source_employment_id'];
+            $record=$this->employment($actor,$source,$employment,false);
+            $known=$this->latestAssignment($actor,$source,$employment);
+            $this->lockPositions($actor,[$m['from_position']=>$source,$m['to_position']=>$target]);
+            $prior=$this->lockCutover($actor,$source,$employment,$record,$known,$m['source_version'],$date);
+            if ($prior['id']!==$m['source_assignment_id']) throw new BusinessError(409,'source_assignment_changed');
+            $moves=new InternalMoves($this->db,$this->operations);
+            $moves->employeeCapacity($actor->groupId,$m['employee_id'],$employment,$date,$m['reserved_fte']);
+            $match=(new InternalMarket($this->db,$this->operations))->match(['id'=>$m['opening_id'],'group_id'=>$actor->groupId,'company_id'=>$target],
+                $source,$m['employee_id'],$date);
+            if (!$match['eligible']) throw new BusinessError(409,'required_evidence_missing',['skills'=>$match['missing_required']]);
+            $targetRevision=$this->organization->activeRevision($actor,$target,$m['to_position'],$date);
+            if ($targetRevision['department_id']!==$m['target_department']) throw new BusinessError(409,'receiving_department_changed');
+            $slot=$this->db->row('SELECT id FROM headcount_slots WHERE group_id=? AND company_id=? AND position_id=? AND id=?
+                AND starts_on=? AND released_at IS NULL FOR UPDATE',[$actor->groupId,$target,$m['to_position'],$m['slot_id'],$date]);
+            if (!$slot) throw new BusinessError(409,'reservation_changed');
+            $this->organization->checkFutureAssignment($actor,$target,$m['to_position'],$m['slot_id']);
+            if ($this->db->row("SELECT id FROM payroll_runs WHERE group_id=? AND company_id IN (?,?) AND period_end>?
+                AND state IN ('closed','published') LIMIT 1",[$actor->groupId,$source,$target,$date])) throw new BusinessError(409,'payroll_period_closed');
+            $contract=$this->db->row('SELECT * FROM internal_move_contracts WHERE move_id=?',[$moveId]);
+            if ($source===$target && !$moves->covered($actor->groupId,$source,$employment,$date)) {
+                throw new BusinessError(409,'move_contract_conflict');
+            }
+            if ($source!==$target && !$contract) throw new BusinessError(409,'receiving_contract_required');
+            $id=$employment;
+            $version=$m['source_version']+1;
+            $this->endAssignment($prior,$date);
+            $this->db->run('UPDATE employments SET assignment_version=assignment_version+1 WHERE id=?',[$employment]);
+            if ($source!==$target) {
+                $this->db->run('UPDATE employments SET ends_before=? WHERE id=?',[$date,$employment]);
+                $id=$this->db->insert('INSERT INTO employments (group_id,company_id,employee_id,starts_on) VALUES (?,?,?,?)',
+                    [$actor->groupId,$target,$m['employee_id'],$date]);
+                $version=1;
+            }
+            $assignment=$this->insertAssignment($actor,$target,$id,$m['to_position'],$targetRevision,$m['slot_id'],$date,$version);
+            if ($source!==$target) {
+                $this->insertContract($actor,$target,$id,1,$contract['reference'],$date,$contract['ends_before'],$contract['monthly_minor']);
+            }
+            $result=['move_id'=>$moveId,'state'=>'effective','effective_date'=>$date,'employment_id'=>$id,'assignment_id'=>$assignment,'assignment_version'=>$version,
+                'source_assignment_id'=>$prior['id'],'source_department'=>$m['source_department'],'target_department'=>$m['target_department'],'reserved_fte'=>$m['reserved_fte']];
+            $this->db->run("UPDATE internal_moves SET state='effective',revision=revision+1,result=? WHERE id=?",[json_encode($result,JSON_THROW_ON_ERROR),$moveId]);
+            $this->db->run("UPDATE internal_applications SET state='transferred',revision=revision+1 WHERE id=?",[$m['application_id']]);
+            $this->db->run("UPDATE internal_openings SET state='filled' WHERE id=?",[$m['opening_id']]);
+            $this->operations->audit($actor,$source,'internal_move',$moveId,'move.departed',$result);
+            $this->operations->audit($actor,$target,'internal_move',$moveId,'move.effective',$result);
+            return $result;
+        });
+    }
+
     private function endAssignment(array $assignment, string $from): void
     {
         $this->db->run('UPDATE assignments SET effective_until=? WHERE id=?', [$from, $assignment['id']]);
